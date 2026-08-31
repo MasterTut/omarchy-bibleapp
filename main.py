@@ -135,13 +135,19 @@ STYLESHEET = """
   html, body {{
     margin: 0;
     padding: 0;
-    background: transparent;
-    color: var(--fg);
+    background: transparent !important;
+    color: {foreground} !important;
     font-family: {font_family}, "JetBrains Mono", monospace;
     font-size: {font_size}px;
     line-height: 1.7;
     overflow: hidden;
     height: 100%;
+  }}
+  #container, .page, #source {{
+    background: transparent !important;
+  }}
+  #container {{
+    color: {foreground} !important;
   }}
   body {{
     box-sizing: border-box;
@@ -921,9 +927,29 @@ class OmarchyReader(Gtk.Application):
 
     def _extract_body(self, content):
         m = re.search(r"<body[^>]*>(.*?)</body>", content, re.S | re.I | re.DOTALL)
-        if m:
-            return m.group(1)
-        return content
+        body = m.group(1) if m else content
+
+        # Drop anything that would inject its own colors/styles and override
+        # the reader's theme: <style>, <link>, <base>, and inline style
+        # attributes that set color or background.
+        body = re.sub(r"<style[\s\S]*?</style>", "", body, flags=re.I)
+        body = re.sub(r"<link\b[^>]*>", "", body, flags=re.I)
+        body = re.sub(r"<base\b[^>]*/?>", "", body, flags=re.I)
+
+        def neutral_style(attr):
+            value = re.sub(
+                r"([a-zA-Z-]*background[a-zA-Z-]*|color)\s*:\s*[^;\"']*;?",
+                "",
+                attr.group(1),
+                flags=re.I,
+            ).strip()
+            if value:
+                return 'style="' + value.rstrip("; ") + '"'
+            return ""
+
+        body = re.sub(r'style\s*=\s*"([^"]*)"', neutral_style, body, flags=re.I)
+        body = re.sub(r"style\s*=\s*'([^']*)'", neutral_style, body, flags=re.I)
+        return body
 
     # ---------------- Chapter loading ----------------
     def _do_load_chapter(self, index):
