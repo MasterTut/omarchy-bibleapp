@@ -419,6 +419,7 @@ class OmarchyReader(Gtk.Application):
         win.connect("key-press-event", self.on_key_pressed_raw)
 
         self.show_welcome()
+        self.window.show_all()
 
     def _title_label(self):
         self.title_label = Gtk.Label(label="Omarchy Reader")
