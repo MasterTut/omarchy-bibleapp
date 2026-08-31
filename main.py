@@ -85,6 +85,8 @@ DEFAULT_HOTKEYS = {
     "toc": "Ctrl+t",
     "toggle_header": "Ctrl+h",
     "toggle_reader_mode": "Ctrl+b",
+    "page_next": "Ctrl+greater",
+    "page_prev": "Ctrl+less",
 }
 
 HOTKEYS = dict(DEFAULT_HOTKEYS)
@@ -1161,6 +1163,12 @@ class OmarchyReader(Gtk.Application):
         if self._hotkey_matches(HOTKEYS.get("font_decrease"), keyname, state):
             self.change_font_size(self.font_size - 2)
             return True
+        if self._hotkey_matches(HOTKEYS.get("page_next"), keyname, state):
+            self._run_js("nextPage();")
+            return True
+        if self._hotkey_matches(HOTKEYS.get("page_prev"), keyname, state):
+            self._run_js("prevPage();")
+            return True
 
         if keyname == "Right":
             self._run_js("nextPage();")
@@ -1196,15 +1204,18 @@ class OmarchyReader(Gtk.Application):
         self._apply_webview_bg()
 
     def _toggle_header(self):
-        """Show or hide the header bar (which also hides the window close/X button)."""
+        """Show or hide the header bar (which also hides the window close/X button).
+
+        Hides/shows the headerbar widget itself rather than removing the
+        titlebar with set_titlebar(None): removing the titlebar from a live
+        CSD window was unreliable (and previously caused the WebKit
+        black-page repaint bug). Toggling widget visibility collapses the
+        titlebar area without that window churn.
+        """
         hb = getattr(self, "headerbar", None)
         if hb is None:
             return
-        if self.window.get_titlebar() is not None:
-            self.window.set_titlebar(None)
-        else:
-            hb.show_all()
-            self.window.set_titlebar(hb)
+        hb.set_visible(not hb.get_visible())
         self._repaint_webview()
 
     def _repaint_webview(self):
