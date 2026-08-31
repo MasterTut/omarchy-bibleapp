@@ -4,6 +4,7 @@
 import os
 import re
 import sys
+import json
 import tempfile
 import shutil
 
@@ -17,7 +18,8 @@ from ebooklib import epub
 
 APP_ID = "org.omarchy.Reader"
 
-THEME = {
+# Fallback palette (Ash) used when the live omarchy theme cannot be read.
+DEFAULT_THEME = {
     "accent": "#626262",
     "foreground": "#e0e0e0",
     "background": "#121212",
@@ -26,6 +28,60 @@ THEME = {
     "muted": "#b2b2b2",
     "color11": "#b2b2b2",
 }
+
+THEME = dict(DEFAULT_THEME)
+
+# Path to the live omarchy theme palette (set by `omarchy theme set`).
+OMARCHY_STATE = os.path.expanduser("~/.local/state/omarchy")
+OMARCHY_CURRENT_THEME = os.path.join(OMARCHY_STATE, "current", "theme")
+OMARCHY_COLORS = os.path.join(OMARCHY_CURRENT_THEME, "colors.toml")
+
+
+def _parse_colors(text):
+    colors = {}
+    for line in text.splitlines():
+        m = re.match(r'\s*([\w-]+)\s*=\s*"(#[0-9a-fA-F]{3,8})"', line)
+        if m:
+            colors[m.group(1)] = m.group(2)
+    return colors
+
+
+def load_theme():
+    """Read the currently applied omarchy theme colors into the global THEME.
+
+    Falls back to the Ash palette when the live palette is missing.
+    """
+    target = {}
+    if os.path.isfile(OMARCHY_COLORS):
+        try:
+            with open(OMARCHY_COLORS, "r", encoding="utf-8") as fh:
+                colors = _parse_colors(fh.read())
+            if colors:
+                picked = {}
+                picked["background"] = colors.get("background")
+                picked["foreground"] = colors.get("foreground")
+                picked["accent"] = colors.get("accent")
+                picked["selection_background"] = colors.get("selection_background", colors.get("cursor"))
+                picked["selection_foreground"] = colors.get("selection_foreground", colors.get("background"))
+                picked["muted"] = colors.get("color11") or colors.get("color7")
+                picked["color11"] = picked["muted"]
+                target = {k: (v or DEFAULT_THEME[k]) for k, v in picked.items()}
+        except Exception:
+            target = dict(DEFAULT_THEME)
+    else:
+        target = dict(DEFAULT_THEME)
+    THEME.clear()
+    THEME.update(target)
+    return True
+
+
+def current_theme_name():
+    try:
+        with open(os.path.join(OMARCHY_STATE, "current", "theme.name"), "r", encoding="utf-8") as fh:
+            return fh.read().strip()
+    except Exception:
+        return "Unknown"
+
 
 FONT_FAMILY = "JetBrainsMono Nerd Font"
 
@@ -287,6 +343,9 @@ class OmarchyReader(Gtk.Application):
         self.window = None
         self.webview = None
         self._is_loading = False
+        self._theme_monitor = None
+        self._parent_monitor = None
+        self._monitor_parent_path = None
 
     def do_command_line(self, command_line):
         options = command_line.get_arguments()
@@ -295,8 +354,10 @@ class OmarchyReader(Gtk.Application):
         return 0
 
     def do_activate(self):
+        load_theme()
         self.create_window()
         self.window.present()
+        self._start_theme_monitor()
         path = getattr(self, "cli_path", None)
         if path:
             self.open_book(path)
@@ -306,49 +367,7 @@ class OmarchyReader(Gtk.Application):
         win.set_title("Omarchy Reader")
         win.set_default_size(900, 700)
 
-        provider = Gtk.CssProvider()
-        provider.load_from_data(
-            f"""
-            window {{
-                background-color: {THEME["background"]};
-            }}
-            headerbar {{
-                background-color: {THEME["background"]};
-                color: {THEME["foreground"]};
-                border-bottom: 1px solid rgba(255,255,255,0.12);
-                padding: 0 6px;
-            }}
-            .title-label {{
-                color: {THEME["foreground"]};
-                font-weight: bold;
-            }}
-            .progress-label {{
-                color: {THEME["muted"]};
-                font-size: 13px;
-                margin-right: 8px;
-            }}
-            button {{
-                color: {THEME["foreground"]};
-                background: transparent;
-                border: 1px solid rgba(255,255,255,0.15);
-                border-radius: 8px;
-                padding: 2px 8px;
-                font-family: {FONT_FAMILY};
-            }}
-            button:hover {{
-                background: rgba(255,255,255,0.08);
-            }}
-            button:disabled {{
-                color: rgba(255,255,255,0.3);
-            }}
-            """.encode()
-        )
-        screen = Gdk.Screen.get_default()
-        Gtk.StyleContext.add_provider_for_screen(
-            screen,
-            provider,
-            Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION,
-        )
+        self._apply_theme_css()
 
         hb = Gtk.HeaderBar()
         hb.set_show_close_button(True)
@@ -389,9 +408,7 @@ class OmarchyReader(Gtk.Application):
         self.webview.set_settings(settings)
         self.webview.connect("context-menu", self._suppress_menu)
         self.webview.connect("load-changed", self.on_load_changed)
-        color = Gdk.RGBA()
-        color.parse(THEME["background"])
-        self.webview.set_background_color(color)
+        self._apply_webview_bg()
 
         scroller = Gtk.ScrolledWindow()
         scroller.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.NEVER)
@@ -420,6 +437,128 @@ class OmarchyReader(Gtk.Application):
 
         self.show_welcome()
         self.window.show_all()
+
+    def _apply_theme_css(self):
+        css = f"""
+            window {{
+                background-color: {THEME["background"]};
+            }}
+            headerbar {{
+                background-color: {THEME["background"]};
+                color: {THEME["foreground"]};
+                border-bottom: 1px solid rgba(255,255,255,0.12);
+                padding: 0 6px;
+            }}
+            .title-label {{
+                color: {THEME["foreground"]};
+                font-weight: bold;
+            }}
+            .progress-label {{
+                color: {THEME["muted"]};
+                font-size: 13px;
+                margin-right: 8px;
+            }}
+            button {{
+                color: {THEME["foreground"]};
+                background: transparent;
+                border: 1px solid rgba(255,255,255,0.15);
+                border-radius: 8px;
+                padding: 2px 8px;
+                font-family: {FONT_FAMILY};
+            }}
+            button:hover {{
+                background: rgba(255,255,255,0.08);
+            }}
+            button:disabled {{
+                color: rgba(255,255,255,0.3);
+            }}
+            """
+        provider = Gtk.CssProvider()
+        provider.load_from_data(css.encode())
+        screen = Gdk.Screen.get_default()
+        Gtk.StyleContext.add_provider_for_screen(
+            screen,
+            provider,
+            Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION,
+        )
+
+    def _apply_webview_bg(self):
+        color = Gdk.RGBA()
+        color.parse(THEME["background"])
+        self.webview.set_background_color(color)
+
+    def _start_theme_monitor(self):
+        """Watch the live omarchy palette and re-render when the theme changes.
+
+        `omarchy theme set` swaps the active theme atomically: it removes the
+        `theme/` directory and moves the new theme in (`rm -rf + mv`). It may
+        also write colors.toml in place while a theme is staged. To catch both
+        we watch two things:
+
+        * the `theme/` directory itself, for in-place colors.toml writes; and
+        * the `current/` parent, for the atomic directory swap. A new instance
+          is launched whenever the `theme/` directory is replaced so the first
+          watcher keeps working after a swap.
+        """
+        try:
+            self._monitor_parent_path = os.path.join(OMARCHY_STATE, "current")
+            # 1. theme/ dir (in-place colors.toml writes)
+            theme_dir = Gio.File.new_for_path(
+                os.path.join(self._monitor_parent_path, "theme")
+            )
+            self._theme_monitor = theme_dir.monitor_directory(
+                Gio.FileMonitorFlags.WATCH_MOVES, None
+            )
+            self._theme_monitor.connect("changed", self._on_theme_dir_changed)
+
+            # 2. parent (atomic theme/ dir replacement)
+            parent = Gio.File.new_for_path(self._monitor_parent_path)
+            self._parent_monitor = parent.monitor_directory(
+                Gio.FileMonitorFlags.WATCH_MOVES, None
+            )
+            self._parent_monitor.connect("changed", self._on_parent_changed)
+        except Exception:
+            self._theme_monitor = None
+            self._parent_monitor = None
+
+    def _on_theme_dir_changed(self, monitor, file, other_file, event):
+        if event == Gio.FileMonitorEvent.CHANGES_DONE_HINT:
+            return
+        GLib.timeout_add(250, self._apply_theme)
+
+    def _on_parent_changed(self, monitor, file, other_file, event):
+        if event in (Gio.FileMonitorEvent.CHANGES_DONE_HINT,):
+            return
+        name = file.get_basename() or ""
+        if name == "theme":
+            # The theme directory was replaced; re-establish the theme/ watcher
+            # so in-place color writes are still observed after a swap.
+            if self._theme_monitor is not None:
+                try:
+                    self._theme_monitor.cancel()
+                except Exception:
+                    pass
+            self._theme_monitor = None
+            if self._parent_monitor is not None:
+                try:
+                    self._parent_monitor.cancel()
+                except Exception:
+                    pass
+            self._parent_monitor = None
+            self._start_theme_monitor()
+            GLib.timeout_add(250, self._apply_theme)
+
+    def _apply_theme(self):
+        load_theme()
+        self._apply_theme_css()
+        if self.webview is not None:
+            self._apply_webview_bg()
+        # Re-render the current view so colors are picked up live.
+        if self.chapters:
+            self._do_load_chapter(self.chapter_index)
+        else:
+            self.show_welcome()
+        return False
 
     def _title_label(self):
         self.title_label = Gtk.Label(label="Omarchy Reader")
