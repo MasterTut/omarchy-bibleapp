@@ -481,6 +481,10 @@ class OmarchyReader(Gtk.Application):
 
         self.show_welcome()
         self.window.show_all()
+        # Ensure the overlay panels start hidden even though show_all() forces
+        # visibility on the whole tree.
+        self.loading_box.set_visible(False)
+        self.toc_overlay.set_visible(False)
 
     def _build_toc_overlay(self):
         """Build the chapter-list overlay ("Table of Contents")."""
@@ -506,29 +510,34 @@ class OmarchyReader(Gtk.Application):
         self.toc_count = count
         bar.pack_end(count, False, False, 0)
 
-        self.toc_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
-        self.toc_box.set_halign(Gtk.Align.START)
-        self.toc_box.set_hexpand(False)
-        self.toc_box.set_margin_start(16)
-        self.toc_box.set_margin_end(16)
-        self.toc_box.set_margin_bottom(16)
+        row = Gtk.ListBox()
+        row.set_selection_mode(Gtk.SelectionMode.NONE)
+        self.toc_list = row
+        self.toc_list.set_vexpand(True)
+        self.toc_list.set_margin_start(16)
+        self.toc_list.set_margin_end(16)
+        self.toc_list.set_margin_bottom(16)
+        self.toc_list.connect("row-activated", self._on_toc_row_activated)
+
+        self.toc_box = self.toc_list
 
         scroller = Gtk.ScrolledWindow()
         scroller.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
         scroller.set_vexpand(True)
-        scroller.add(self.toc_box)
+        scroller.add(self.toc_list)
 
         self.toc_overlay.pack_start(bar, False, False, 0)
         self.toc_overlay.pack_start(scroller, True, True, 0)
 
     def _refresh_toc(self):
         """(Re)populate the chapter list from the current book."""
-        rows = self.toc_box.get_children()
+        rows = self.toc_list.get_children()
         for r in rows:
-            self.toc_box.remove(r)
+            self.toc_list.remove(r)
+        self._toc_row_index = {}
         for i, (_, title, _, _) in enumerate(self.chapters):
             row = Gtk.ListBoxRow()
-            row.set_visible(True)
+            self._toc_row_index[row] = i
             box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
             num = Gtk.Label(label=str(i + 1))
             num.get_style_context().add_class("toc-num")
@@ -544,8 +553,7 @@ class OmarchyReader(Gtk.Application):
             box.pack_start(num, False, False, 0)
             box.pack_start(txt, True, True, 0)
             row.add(box)
-            row.connect("activate", self._on_toc_activate, i)
-            self.toc_box.pack_start(row, False, False, 0)
+            self.toc_list.add(row)
         self.toc_count.set_text(
             f"{len(self.chapters)} chapter{'s' if len(self.chapters) != 1 else ''}"
         )
@@ -560,12 +568,16 @@ class OmarchyReader(Gtk.Application):
         if not self.chapters:
             return
         self._refresh_toc()
+        self.toc_overlay.show_all()
         self.toc_overlay.set_visible(True)
 
     def _hide_toc(self):
         self.toc_overlay.set_visible(False)
 
-    def _on_toc_activate(self, row, index):
+    def _on_toc_row_activated(self, listbox, row):
+        index = self._toc_row_index.get(row)
+        if index is None:
+            return
         self._hide_toc()
         if 0 <= index < len(self.chapters) and index != self.chapter_index:
             self._do_load_chapter(index)
@@ -1048,6 +1060,21 @@ class OmarchyReader(Gtk.Application):
         else:
             hb.show_all()
             self.window.set_titlebar(hb)
+        self._repaint_webview()
+
+    def _repaint_webview(self):
+        """Force the WebKit view to redraw after a window/titlebar relayout.
+
+        Removing/re-adding the CSD titlebar resizes the window; WebKitGTK often
+        fails to repaint after that and the view goes black. Queuing a resize
+        and a draw nudges it to re-render the current page. We deliberately do
+        NOT call show_all() on the overlay here, as that would also re-show the
+        hidden loading/TOC overlay panels.
+        """
+        if self.webview is None:
+            return
+        self.window.queue_resize()
+        GLib.idle_add(lambda: self.webview.queue_draw() or False)
 
     def change_font_size(self, value):
         self.font_size = max(12, min(34, value))
