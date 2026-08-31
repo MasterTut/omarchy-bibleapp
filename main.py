@@ -85,8 +85,8 @@ DEFAULT_HOTKEYS = {
     "toc": "Ctrl+t",
     "toggle_header": "Ctrl+h",
     "toggle_reader_mode": "Ctrl+b",
-    "page_next": "Ctrl+greater",
-    "page_prev": "Ctrl+less",
+    "page_next": "Ctrl+Right",
+    "page_prev": "Ctrl+Left",
 }
 
 HOTKEYS = dict(DEFAULT_HOTKEYS)
