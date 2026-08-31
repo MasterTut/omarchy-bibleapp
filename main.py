@@ -149,22 +149,25 @@ STYLESHEET = """
   #container {{
     color: {foreground} !important;
   }}
+  #container p, #container span, #container li, #container td, #container div {{
+    color: {foreground} !important;
+  }}
   body {{
     box-sizing: border-box;
     padding: 0 {side_padding}px;
   }}
   h1, h2, h3, h4, h5, h6 {{
-    color: var(--accent);
+    color: {accent};
     line-height: 1.3;
     margin: 1.4em 0 0.6em;
   }}
   p {{ margin: 0 0 1.1em; }}
-  a {{ color: var(--fg); text-decoration: underline; }}
+  a {{ color: {foreground}; text-decoration: underline; }}
   blockquote {{
-    border-left: 3px solid var(--accent);
+    border-left: 3px solid {accent};
     margin: 1em 0;
     padding-left: 1em;
-    color: var(--muted);
+    color: {muted};
   }}
   img {{ max-width: 100%; height: auto; border-radius: 4px; }}
   code {{
