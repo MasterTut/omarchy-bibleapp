@@ -536,7 +536,7 @@ class OmarchyReader(Gtk.Application):
             self.toc_list.remove(r)
         self._toc_row_index = {}
         for i, chapter in enumerate(self.chapters):
-            _, title, _, _, description = chapter
+            _, title, _, _ = chapter
             row = Gtk.ListBoxRow()
             self._toc_row_index[row] = i
             num = Gtk.Label(label=str(i + 1))
@@ -545,9 +545,6 @@ class OmarchyReader(Gtk.Application):
             num.set_xalign(1.0)
             num.set_valign(Gtk.Align.START)
 
-            text_col = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
-            text_col.set_halign(Gtk.Align.START)
-
             txt = Gtk.Label(label=title or f"Chapter {i + 1}")
             txt.set_xalign(0.0)
             txt.set_line_wrap(True)
@@ -555,19 +552,10 @@ class OmarchyReader(Gtk.Application):
             txt.get_style_context().add_class("toc-title")
             if i == self.chapter_index:
                 txt.get_style_context().add_class("toc-current")
-            text_col.pack_start(txt, False, False, 0)
-
-            if description:
-                desc = Gtk.Label(label=description)
-                desc.set_xalign(0.0)
-                desc.set_line_wrap(True)
-                desc.set_halign(Gtk.Align.START)
-                desc.get_style_context().add_class("toc-desc")
-                text_col.pack_start(desc, False, False, 0)
 
             box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
             box.pack_start(num, False, False, 0)
-            box.pack_start(text_col, True, True, 0)
+            box.pack_start(txt, True, True, 0)
             row.add(box)
             self.toc_list.add(row)
         self.toc_count.set_text(
@@ -637,16 +625,11 @@ class OmarchyReader(Gtk.Application):
             }}
             .toc-title {{
                 color: {THEME["foreground"]};
-                padding: 8px 8px 0 8px;
+                padding: 6px 8px;
             }}
             .toc-title.toc-current {{
                 color: {THEME["accent"]};
                 font-weight: bold;
-            }}
-            .toc-desc {{
-                color: {THEME["muted"]};
-                font-size: 12px;
-                padding: 0 8px 6px 8px;
             }}
             .toc-num {{
                 color: {THEME["muted"]};
@@ -863,69 +846,77 @@ class OmarchyReader(Gtk.Application):
             except Exception:
                 pass
 
-        # Build a lookup from EPUB TOC (href -> title).
-        toc_by_href = {}
-        for link in self.book.toc:
-            href_base = link.href.split("#")[0]
-            if href_base not in toc_by_href and link.title:
-                toc_by_href[href_base] = link.title
-
+        # Build chapters from the book's own table of contents (ebooklib exposes
+        # it as a flat list of epub.Link objects). This gives the structural
+        # chapter list (e.g. "Genesis", "Exodus", ...) rather than every spine
+        # item, which for many books is hundreds of raw fragments.
+        entries = self._flatten_toc()
         self.chapters = []
-        spine = list(self.book.spine)
-        for item in spine:
-            try:
-                idref = item[0]
-            except Exception:
+        for title, href in entries:
+            name = self._resolve_href(href)
+            if not name:
                 continue
-            chapter = self.book.get_item_with_id(idref)
-            if chapter is None:
-                continue
-            name = chapter.get_name()
             path = self._item_paths.get(name)
             if not path:
                 continue
-            toc_title = toc_by_href.get(name, "")
-            title = self._chapter_title(chapter, toc_title=toc_title)
-            description = self._chapter_description(chapter)
-            self.chapters.append((idref, title, path, name, description))
+            self.chapters.append(("", title or "Chapter", path, name))
 
+        # Fallback: no usable TOC, use document spine items.
         if not self.chapters:
             for item in self.book.get_items_of_type(ebooklib.ITEM_DOCUMENT):
                 name = item.get_name()
                 path = self._item_paths.get(name)
                 if not path:
                     continue
-                toc_title = toc_by_href.get(name, "")
-                title = toc_title or item.get_title() or os.path.basename(name)
-                description = ""
-                self.chapters.append(("", title, path, name, description))
+                title = item.get_title() or os.path.basename(name)
+                self.chapters.append(("", title, path, name))
 
-    def _chapter_title(self, chapter, toc_title=""):
-        if toc_title:
-            return toc_title
-        try:
-            t = chapter.get_title()
-            if t:
-                return t
-            text = chapter.get_content().decode("utf-8", "ignore")
-            m = re.search(r"<h[12][^>]*>(.*?)</h[12]>", text, re.S | re.I)
-            if m:
-                return re.sub(r"<[^>]+>", "", m.group(1)).strip()[:60]
-        except Exception:
-            pass
-        return "Chapter"
+    def _flatten_toc(self):
+        """Return a flat list of (title, href) from the book's TOC.
 
-    def _chapter_description(self, chapter):
-        try:
-            content = chapter.get_content().decode("utf-8", "ignore")
-            # Find the first <p> with real text content
-            for m in re.finditer(r"<p[^>]*>(.*?)</p>", content, re.S | re.I):
-                text = re.sub(r"<[^>]+>", "", m.group(1)).strip()
-                # Skip empty or very short paragraphs
-                if len(text) > 20:
-                    return text[:120] + ("..." if len(text) > 120 else "")
-        except Exception:
-            pass
+        ebooklib's `book.toc` is normally a flat list of epub.Link, but some
+        books nest sections as (Link, [children]) tuples. This flattens both.
+        """
+        result = []
+        raw = getattr(self.book, "toc", None) or []
+        if isinstance(raw, str):
+            return result
+        stack = list(raw)
+        while stack:
+            node = stack.pop(0)
+            if isinstance(node, tuple):
+                link, children = node[0], node[1]
+                if isinstance(link, str) or link is None:
+                    continue
+                try:
+                    if link.title:
+                        result.append((link.title, link.href))
+                except Exception:
+                    pass
+                if children:
+                    stack = list(children) + stack
+            else:
+                try:
+                    if getattr(node, "title", None):
+                        result.append((node.title, node.href))
+                except Exception:
+                    pass
+        return result
+
+    def _resolve_href(self, href):
+        """Resolve a TOC href to a document item name, or '' if not found."""
+        if not href:
+            return ""
+        target = href.split("#")[0].replace("\\", "/")
+        while target.startswith("./"):
+            target = target[2:]
+        # ebooklib item names may also carry a leading './'
+        if target in self._item_paths:
+            return target
+        stripped = target.lstrip("./")
+        for name in self._item_paths:
+            if name.lstrip("./") == stripped:
+                return name
         return ""
 
     def _extract_body(self, content):
@@ -939,7 +930,7 @@ class OmarchyReader(Gtk.Application):
         if index < 0 or index >= len(self.chapters):
             return False
         self.chapter_index = index
-        _, title, path, _, _ = self.chapters[index]
+        _, title, path, _ = self.chapters[index]
         self.title_label.set_text(title)
         self.progress_label.set_text(f"{index + 1}/{len(self.chapters)}")
 
