@@ -125,8 +125,8 @@ STYLESHEET = """
 </style>
 """
 
-PAGE_JS = """
-var state = { pages: 0, current: 0, ready: false };
+PAGE_JS = r"""
+var state = { pages: 0, current: 0, ready: false, reported: false };
 
 function post(msg) {
   if (window.webkit && window.webkit.messageHandlers &&
@@ -156,7 +156,7 @@ function paginate() {
 
   var nodes = Array.prototype.slice.call(source.childNodes);
   var pieces = nodes.map(nodeToHtml).filter(function (s) { return s && s.trim(); });
-  if (pieces.length === 0) { state.ready = true; post({type:'ready', pages:0}); return 0; }
+  if (pieces.length === 0) { state.pages = 0; state.ready = true; return 0; }
 
   var probe = document.createElement('div');
   probe.className = 'page';
@@ -198,8 +198,11 @@ function paginate() {
   state.current = 0;
   state.ready = true;
   window.scrollTo(0, 0);
-  post({type:'ready', pages: state.pages});
   return pages.length;
+}
+
+function report() {
+  post({type:'ready', pages: state.pages});
 }
 
 function currentPageIdx() { return state.current; }
@@ -248,6 +251,25 @@ function gotoNextChapter() {
 function gotoPrevChapter() {
   post({type:'edge', dir:'prev'});
 }
+
+// Bootstrap: retry pagination until content lays out, then report exactly once.
+(function () {
+  var tries = 0, reported = false;
+  function attempt() {
+    if (reported) return;
+    var n = 0;
+    try { n = paginate(); } catch (e) { post({type:'jserror', msg: 'paginate: ' + e.message}); }
+    if (n > 0) { reported = true; report(); return; }
+    var src = document.getElementById('source');
+    var empty = !src || src.childNodes.length === 0 ||
+                (src.innerHTML && src.innerHTML.replace(/\s/g, '').length === 0);
+    if (empty || tries >= 30) { reported = true; report(); return; }
+    tries++;
+    setTimeout(attempt, 120);
+  }
+  window.addEventListener('load', function () { setTimeout(attempt, 120); });
+  window.addEventListener('resize', function () { setTimeout(attempt, 120); });
+})();
 """
 
 JS_HANDLER = "omarchy"
@@ -375,8 +397,25 @@ class OmarchyReader(Gtk.Application):
         scroller.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.NEVER)
         scroller.add(self.webview)
 
+        # Native loading overlay (avoids a second load_html call, which raced and
+        # intermittently produced a blank window).
+        self.loading_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+        self.loading_box.set_halign(Gtk.Align.CENTER)
+        self.loading_box.set_valign(Gtk.Align.CENTER)
+        self.loading_box.set_visible(False)
+        self.loading_msg = Gtk.Label(label="Loading book…")
+        self.loading_msg.get_style_context().add_class("title-label")
+        self.loading_sub = Gtk.Label(label="Opening EPUB file")
+        self.loading_sub.get_style_context().add_class("progress-label")
+        self.loading_box.pack_start(self.loading_msg, False, False, 0)
+        self.loading_box.pack_start(self.loading_sub, False, False, 0)
+
+        self.loading_overlay_win = Gtk.Overlay()
+        self.loading_overlay_win.add(scroller)
+        self.loading_overlay_win.add_overlay(self.loading_box)
+
         self.window = win
-        win.add(scroller)
+        win.add(self.loading_overlay_win)
         win.connect("key-press-event", self.on_key_pressed_raw)
 
         self.show_welcome()
@@ -412,6 +451,7 @@ class OmarchyReader(Gtk.Application):
     def show_welcome(self):
         self._is_loading = False
         self._show_spinner(False)
+        self.loading_box.set_visible(False)
         html = f"""<!doctype html><html><head><meta charset="utf-8">
 {self._styles()}
 </head><body>
@@ -423,22 +463,13 @@ class OmarchyReader(Gtk.Application):
 </body></html>"""
         self.webview.load_html(html, None)
 
-    def show_loading(self):
+    def show_loading(self, msg="Opening EPUB file"):
+        # Native GTK overlay — no second load_html, so no blank-window race.
         self._is_loading = True
         self._show_spinner(True)
-        html = f"""<!doctype html><html><head><meta charset="utf-8">
-{self._styles()}
-</head><body>
-<div style="display:flex;flex-direction:column;align-items:center;justify-content:center;height:100%;text-align:center;color:{THEME['muted']};">
-    <div style="position:fixed;left:0;right:0;bottom:0;height:3px;z-index:9999;background:rgba(255,255,255,0.08);overflow:hidden;">
-        <div style="height:100%;width:30%;background:{THEME['accent']};animation:loading-slide 1.2s ease-in-out infinite;"></div>
-    </div>
-    <style>@keyframes loading-slide {{ 0% {{ transform: translateX(-100%); }} 100% {{ transform: translateX(400%); }} }}</style>
-    <div style="font-size:{self.font_size*1.2}px;margin-bottom:0.5em;color:{THEME['accent']};">Loading book…</div>
-    <div style="opacity:0.6;font-size:{self.font_size}px;" id="load-status">Opening EPUB file</div>
-</div>
-</body></html>"""
-        self.webview.load_html(html, None)
+        self.loading_msg.set_text("Loading book…")
+        self.loading_sub.set_text(msg)
+        self.loading_box.set_visible(True)
 
     # ---------------- File open ----------------
     def on_open(self, *args):
@@ -573,14 +604,6 @@ class OmarchyReader(Gtk.Application):
         html = f"""<!doctype html><html><head><meta charset="utf-8">
 {self._styles()}
 <script>{PAGE_JS}</script>
-<script>
-window.addEventListener('load', function () {{
-  setTimeout(paginate, 120);
-}});
-window.addEventListener('resize', function () {{
-  setTimeout(paginate, 120);
-}});
-</script>
 </head><body>
 <div id="source" style="display:none;">{body_content}</div>
 <div id="container"></div>
@@ -611,6 +634,7 @@ window.addEventListener('resize', function () {{
         if mtype == "ready":
             self._is_loading = False
             pages = data.get("pages", 0)
+            self.loading_box.set_visible(False)
             self._show_spinner(False)
             self._show_progress(1)
             if hasattr(self, "_page_pages"):
