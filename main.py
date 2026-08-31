@@ -691,12 +691,15 @@ class OmarchyReader(Gtk.Application):
             fg, link = "#1a1a1a", "#1f6feb"
         else:
             fg, link = "#ffffff", "#93c5fd"
+        size = getattr(self, "font_size", 18)
         css = (
             "html, body, #container, #container *, #source * "
             "{{ color: {fg} !important; }} "
+            "html, body, #container "
+            "{{ font-size: {size}px !important; }} "
             "#container a, #container a *, #source a, #source a * "
             "{{ color: {link} !important; }}"
-        ).format(fg=fg, link=link)
+        ).format(fg=fg, link=link, size=size)
         sheet = WebKit2.UserStyleSheet(
             css,
             WebKit2.UserContentInjectedFrames.TOP_FRAME,
@@ -1220,6 +1223,7 @@ class OmarchyReader(Gtk.Application):
 
     def change_font_size(self, value):
         self.font_size = max(12, min(34, value))
+        self._apply_user_stylesheet()
         if self.chapters:
             self._do_load_chapter(self.chapter_index)
         else:
