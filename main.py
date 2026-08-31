@@ -535,14 +535,19 @@ class OmarchyReader(Gtk.Application):
         for r in rows:
             self.toc_list.remove(r)
         self._toc_row_index = {}
-        for i, (_, title, _, _) in enumerate(self.chapters):
+        for i, chapter in enumerate(self.chapters):
+            _, title, _, _, description = chapter
             row = Gtk.ListBoxRow()
             self._toc_row_index[row] = i
-            box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
             num = Gtk.Label(label=str(i + 1))
             num.get_style_context().add_class("toc-num")
             num.set_width_chars(4)
             num.set_xalign(1.0)
+            num.set_valign(Gtk.Align.START)
+
+            text_col = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+            text_col.set_halign(Gtk.Align.START)
+
             txt = Gtk.Label(label=title or f"Chapter {i + 1}")
             txt.set_xalign(0.0)
             txt.set_line_wrap(True)
@@ -550,8 +555,19 @@ class OmarchyReader(Gtk.Application):
             txt.get_style_context().add_class("toc-title")
             if i == self.chapter_index:
                 txt.get_style_context().add_class("toc-current")
+            text_col.pack_start(txt, False, False, 0)
+
+            if description:
+                desc = Gtk.Label(label=description)
+                desc.set_xalign(0.0)
+                desc.set_line_wrap(True)
+                desc.set_halign(Gtk.Align.START)
+                desc.get_style_context().add_class("toc-desc")
+                text_col.pack_start(desc, False, False, 0)
+
+            box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
             box.pack_start(num, False, False, 0)
-            box.pack_start(txt, True, True, 0)
+            box.pack_start(text_col, True, True, 0)
             row.add(box)
             self.toc_list.add(row)
         self.toc_count.set_text(
@@ -621,11 +637,16 @@ class OmarchyReader(Gtk.Application):
             }}
             .toc-title {{
                 color: {THEME["foreground"]};
-                padding: 6px 8px;
+                padding: 8px 8px 0 8px;
             }}
             .toc-title.toc-current {{
                 color: {THEME["accent"]};
                 font-weight: bold;
+            }}
+            .toc-desc {{
+                color: {THEME["muted"]};
+                font-size: 12px;
+                padding: 0 8px 6px 8px;
             }}
             .toc-num {{
                 color: {THEME["muted"]};
@@ -842,6 +863,13 @@ class OmarchyReader(Gtk.Application):
             except Exception:
                 pass
 
+        # Build a lookup from EPUB TOC (href -> title).
+        toc_by_href = {}
+        for link in self.book.toc:
+            href_base = link.href.split("#")[0]
+            if href_base not in toc_by_href and link.title:
+                toc_by_href[href_base] = link.title
+
         self.chapters = []
         spine = list(self.book.spine)
         for item in spine:
@@ -856,8 +884,10 @@ class OmarchyReader(Gtk.Application):
             path = self._item_paths.get(name)
             if not path:
                 continue
-            title = self._chapter_title(chapter)
-            self.chapters.append((idref, title, path, name))
+            toc_title = toc_by_href.get(name, "")
+            title = self._chapter_title(chapter, toc_title=toc_title)
+            description = self._chapter_description(chapter)
+            self.chapters.append((idref, title, path, name, description))
 
         if not self.chapters:
             for item in self.book.get_items_of_type(ebooklib.ITEM_DOCUMENT):
@@ -865,10 +895,14 @@ class OmarchyReader(Gtk.Application):
                 path = self._item_paths.get(name)
                 if not path:
                     continue
-                title = item.get_title() or os.path.basename(name)
-                self.chapters.append(("", title, path, name))
+                toc_title = toc_by_href.get(name, "")
+                title = toc_title or item.get_title() or os.path.basename(name)
+                description = ""
+                self.chapters.append(("", title, path, name, description))
 
-    def _chapter_title(self, chapter):
+    def _chapter_title(self, chapter, toc_title=""):
+        if toc_title:
+            return toc_title
         try:
             t = chapter.get_title()
             if t:
@@ -881,6 +915,19 @@ class OmarchyReader(Gtk.Application):
             pass
         return "Chapter"
 
+    def _chapter_description(self, chapter):
+        try:
+            content = chapter.get_content().decode("utf-8", "ignore")
+            # Find the first <p> with real text content
+            for m in re.finditer(r"<p[^>]*>(.*?)</p>", content, re.S | re.I):
+                text = re.sub(r"<[^>]+>", "", m.group(1)).strip()
+                # Skip empty or very short paragraphs
+                if len(text) > 20:
+                    return text[:120] + ("..." if len(text) > 120 else "")
+        except Exception:
+            pass
+        return ""
+
     def _extract_body(self, content):
         m = re.search(r"<body[^>]*>(.*?)</body>", content, re.S | re.I | re.DOTALL)
         if m:
@@ -892,7 +939,7 @@ class OmarchyReader(Gtk.Application):
         if index < 0 or index >= len(self.chapters):
             return False
         self.chapter_index = index
-        _, title, path, _ = self.chapters[index]
+        _, title, path, _, _ = self.chapters[index]
         self.title_label.set_text(title)
         self.progress_label.set_text(f"{index + 1}/{len(self.chapters)}")
 
