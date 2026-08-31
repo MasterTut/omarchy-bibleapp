@@ -5,6 +5,7 @@ import os
 import re
 import sys
 import json
+import tomllib
 import tempfile
 import shutil
 
@@ -72,6 +73,43 @@ def load_theme():
         target = dict(DEFAULT_THEME)
     THEME.clear()
     THEME.update(target)
+    return True
+
+
+# ~/.config/omarchy-reader/config.toml  (user-editable hotkeys)
+CONFIG_PATH = os.path.expanduser("~/.config/omarchy-reader/config.toml")
+
+DEFAULT_HOTKEYS = {
+    "font_increase": "Ctrl+equal",
+    "font_decrease": "Ctrl+minus",
+    "toc": "Ctrl+t",
+    "toggle_header": "Ctrl+h",
+}
+
+HOTKEYS = dict(DEFAULT_HOTKEYS)
+
+
+def load_config():
+    """Load user hotkeys from ~/.config/omarchy-reader/config.toml.
+
+    Only values actually provided in the file override the defaults, so a
+    partial config file is fine. Missing/invalid files keep the defaults.
+    """
+    global HOTKEYS
+    config = {}
+    if os.path.isfile(CONFIG_PATH):
+        try:
+            with open(CONFIG_PATH, "rb") as fh:
+                config = tomllib.load(fh)
+        except Exception:
+            config = {}
+    hotkeys = config.get("hotkeys", {}) if isinstance(config, dict) else {}
+    merged = dict(DEFAULT_HOTKEYS)
+    if isinstance(hotkeys, dict):
+        for key, value in hotkeys.items():
+            if isinstance(value, str) and value.strip():
+                merged[key] = value.strip()
+    HOTKEYS = merged
     return True
 
 
@@ -355,6 +393,7 @@ class OmarchyReader(Gtk.Application):
 
     def do_activate(self):
         load_theme()
+        load_config()
         self.create_window()
         self.window.present()
         self._start_theme_monitor()
@@ -391,6 +430,7 @@ class OmarchyReader(Gtk.Application):
         hb.pack_end(self._fs_button("A-", self.font_size - 2))
         hb.pack_end(self._fs_button("A+", self.font_size + 2))
 
+        self.headerbar = hb
         win.set_titlebar(hb)
 
         settings = WebKit2.Settings()
@@ -431,12 +471,104 @@ class OmarchyReader(Gtk.Application):
         self.loading_overlay_win.add(scroller)
         self.loading_overlay_win.add_overlay(self.loading_box)
 
+        # Table of contents overlay (hidden until toggled).
+        self._build_toc_overlay()
+        self.loading_overlay_win.add_overlay(self.toc_overlay)
+
         self.window = win
         win.add(self.loading_overlay_win)
         win.connect("key-press-event", self.on_key_pressed_raw)
 
         self.show_welcome()
         self.window.show_all()
+
+    def _build_toc_overlay(self):
+        """Build the chapter-list overlay ("Table of Contents")."""
+        self.toc_overlay = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        self.toc_overlay.set_visible(False)
+        self.toc_overlay.set_halign(Gtk.Align.FILL)
+        self.toc_overlay.set_valign(Gtk.Align.FILL)
+        self.toc_overlay.get_style_context().add_class("toc-overlay")
+
+        bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        bar.set_margin_start(16)
+        bar.set_margin_end(16)
+        bar.set_margin_top(12)
+        bar.set_margin_bottom(8)
+
+        label = Gtk.Label(label="Table of Contents")
+        label.get_style_context().add_class("title-label")
+        label.set_halign(Gtk.Align.START)
+        bar.pack_start(label, True, True, 0)
+
+        count = Gtk.Label(label="")
+        count.get_style_context().add_class("progress-label")
+        self.toc_count = count
+        bar.pack_end(count, False, False, 0)
+
+        self.toc_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        self.toc_box.set_halign(Gtk.Align.START)
+        self.toc_box.set_hexpand(False)
+        self.toc_box.set_margin_start(16)
+        self.toc_box.set_margin_end(16)
+        self.toc_box.set_margin_bottom(16)
+
+        scroller = Gtk.ScrolledWindow()
+        scroller.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
+        scroller.set_vexpand(True)
+        scroller.add(self.toc_box)
+
+        self.toc_overlay.pack_start(bar, False, False, 0)
+        self.toc_overlay.pack_start(scroller, True, True, 0)
+
+    def _refresh_toc(self):
+        """(Re)populate the chapter list from the current book."""
+        rows = self.toc_box.get_children()
+        for r in rows:
+            self.toc_box.remove(r)
+        for i, (_, title, _, _) in enumerate(self.chapters):
+            row = Gtk.ListBoxRow()
+            row.set_visible(True)
+            box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+            num = Gtk.Label(label=str(i + 1))
+            num.get_style_context().add_class("toc-num")
+            num.set_width_chars(4)
+            num.set_xalign(1.0)
+            txt = Gtk.Label(label=title or f"Chapter {i + 1}")
+            txt.set_xalign(0.0)
+            txt.set_line_wrap(True)
+            txt.set_halign(Gtk.Align.START)
+            txt.get_style_context().add_class("toc-title")
+            if i == self.chapter_index:
+                txt.get_style_context().add_class("toc-current")
+            box.pack_start(num, False, False, 0)
+            box.pack_start(txt, True, True, 0)
+            row.add(box)
+            row.connect("activate", self._on_toc_activate, i)
+            self.toc_box.pack_start(row, False, False, 0)
+        self.toc_count.set_text(
+            f"{len(self.chapters)} chapter{'s' if len(self.chapters) != 1 else ''}"
+        )
+
+    def _toggle_toc(self):
+        if self.toc_overlay.get_visible():
+            self._hide_toc()
+        else:
+            self._show_toc()
+
+    def _show_toc(self):
+        if not self.chapters:
+            return
+        self._refresh_toc()
+        self.toc_overlay.set_visible(True)
+
+    def _hide_toc(self):
+        self.toc_overlay.set_visible(False)
+
+    def _on_toc_activate(self, row, index):
+        self._hide_toc()
+        if 0 <= index < len(self.chapters) and index != self.chapter_index:
+            self._do_load_chapter(index)
 
     def _apply_theme_css(self):
         css = f"""
@@ -471,6 +603,27 @@ class OmarchyReader(Gtk.Application):
             }}
             button:disabled {{
                 color: rgba(255,255,255,0.3);
+            }}
+            .toc-overlay {{
+                background-color: alpha({THEME["background"]}, 0.96);
+            }}
+            .toc-title {{
+                color: {THEME["foreground"]};
+                padding: 6px 8px;
+            }}
+            .toc-title.toc-current {{
+                color: {THEME["accent"]};
+                font-weight: bold;
+            }}
+            .toc-num {{
+                color: {THEME["muted"]};
+                font-size: 12px;
+            }}
+            .toc-overlay row {{
+                background: transparent;
+            }}
+            .toc-overlay row:hover {{
+                background: alpha({THEME["accent"]}, 0.12);
             }}
             """
         provider = Gtk.CssProvider()
@@ -829,9 +982,45 @@ class OmarchyReader(Gtk.Application):
             return True
         return False
 
+    def _hotkey_matches(self, binding, keyname, state):
+        """Return True when a configured binding (e.g. \"Ctrl+equal\") matches.
+
+        Bindings are written as modifier + key name, e.g. Ctrl+t, Ctrl+H, or a
+        bare key name like t. Only Ctrl is supported right now.
+        """
+        if not binding:
+            return False
+        parts = [p.strip() for p in binding.split("+")]
+        want_ctrl = "ctrl" in [p.lower() for p in parts]
+        key = parts[-1]
+        if keyname != key:
+            return False
+        has_ctrl = bool(state & Gdk.ModifierType.CONTROL_MASK)
+        return has_ctrl == want_ctrl
+
     def on_key_pressed_raw(self, widget, event):
         keyname = Gdk.keyval_name(event.keyval)
         state = event.state
+
+        if keyname == "Escape":
+            if self.toc_overlay.get_visible():
+                self._hide_toc()
+                return True
+            return False
+
+        if self._hotkey_matches(HOTKEYS.get("toc"), keyname, state):
+            self._toggle_toc()
+            return True
+        if self._hotkey_matches(HOTKEYS.get("toggle_header"), keyname, state):
+            self._toggle_header()
+            return True
+        if self._hotkey_matches(HOTKEYS.get("font_increase"), keyname, state):
+            self.change_font_size(self.font_size + 2)
+            return True
+        if self._hotkey_matches(HOTKEYS.get("font_decrease"), keyname, state):
+            self.change_font_size(self.font_size - 2)
+            return True
+
         if keyname == "Right":
             self._run_js("nextPage();")
             return True
@@ -848,6 +1037,17 @@ class OmarchyReader(Gtk.Application):
             self.on_open()
             return True
         return False
+
+    def _toggle_header(self):
+        """Show or hide the header bar (which also hides the window close/X button)."""
+        hb = getattr(self, "headerbar", None)
+        if hb is None:
+            return
+        if self.window.get_titlebar() is not None:
+            self.window.set_titlebar(None)
+        else:
+            hb.show_all()
+            self.window.set_titlebar(hb)
 
     def change_font_size(self, value):
         self.font_size = max(12, min(34, value))
