@@ -410,6 +410,14 @@ class OmarchyReader(Gtk.Application):
         win.set_title("Omarchy Reader")
         win.set_default_size(900, 700)
 
+        # Enable real window transparency: the reading surface uses a
+        # semi-transparent background so the desktop subtly shows through.
+        win.set_app_paintable(True)
+        screen = win.get_screen()
+        rgba_visual = screen.get_rgba_visual()
+        if rgba_visual is not None:
+            win.set_visual(rgba_visual)
+
         self._apply_theme_css()
 
         hb = Gtk.HeaderBar()
@@ -450,9 +458,11 @@ class OmarchyReader(Gtk.Application):
 
         self.webview = WebKit2.WebView.new_with_user_content_manager(self.user_content)
         self.webview.set_settings(settings)
+        self.webview.set_app_paintable(True)
         self.webview.connect("context-menu", self._suppress_menu)
         self.webview.connect("load-changed", self.on_load_changed)
         self._apply_webview_bg()
+        self._apply_user_stylesheet()
 
         scroller = Gtk.ScrolledWindow()
         scroller.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.NEVER)
@@ -663,7 +673,38 @@ class OmarchyReader(Gtk.Application):
             color.parse("#f5f5f4")
         else:
             color.parse(THEME["background"])
+        # Semi-transparent so the desktop subtly shows through.
+        color.alpha = 0.85
         self.webview.set_background_color(color)
+
+    def _apply_user_stylesheet(self):
+        """Inject the reading text color at USER style level.
+
+        The in-page <style> color rules are ignored by WebKitGTK for body
+        text in dark mode (text renders black regardless), so we force the
+        color through the UserContentManager, which beats page/UA styles.
+        """
+        if getattr(self, "user_content", None) is None:
+            return
+        self.user_content.remove_all_style_sheets()
+        if getattr(self, "reading_mode", "dark") == "light":
+            fg, link = "#1a1a1a", "#1f6feb"
+        else:
+            fg, link = "#ffffff", "#93c5fd"
+        css = (
+            "html, body, #container, #container *, #source * "
+            "{{ color: {fg} !important; }} "
+            "#container a, #container a *, #source a, #source a * "
+            "{{ color: {link} !important; }}"
+        ).format(fg=fg, link=link)
+        sheet = WebKit2.UserStyleSheet(
+            css,
+            WebKit2.UserContentInjectedFrames.TOP_FRAME,
+            WebKit2.UserStyleLevel.USER,
+            None,
+            None,
+        )
+        self.user_content.add_style_sheet(sheet)
 
     def _start_theme_monitor(self):
         """Watch the live omarchy palette and re-render when the theme changes.
@@ -731,6 +772,7 @@ class OmarchyReader(Gtk.Application):
         self._apply_theme_css()
         if self.webview is not None:
             self._apply_webview_bg()
+            self._apply_user_stylesheet()
         # Re-render the current view so colors are picked up live.
         if self.chapters:
             self._do_load_chapter(self.chapter_index)
@@ -757,13 +799,14 @@ class OmarchyReader(Gtk.Application):
             fg = "#1a1a1a"
             muted = "#555555"
             accent = "#1f6feb"
-            content_bg = "#f5f5f4"
         else:
             bg = THEME["background"]
-            fg = THEME["foreground"]
+            fg = "#ffffff"
             muted = THEME["color11"]
             accent = THEME["accent"]
-            content_bg = "transparent"
+        # The page itself stays transparent in both modes; the semi-transparent
+        # webview background (set per-mode) provides the color.
+        content_bg = "transparent"
         return STYLESHEET.format(
             background=bg,
             foreground=fg,
@@ -1141,6 +1184,7 @@ class OmarchyReader(Gtk.Application):
         contrast. Reloads the current view to apply the new colors.
         """
         self.reading_mode = "light" if self.reading_mode != "light" else "dark"
+        self._apply_user_stylesheet()
         if getattr(self, "webview", None) is not None:
             if self.chapters:
                 self._do_load_chapter(self.chapter_index)
