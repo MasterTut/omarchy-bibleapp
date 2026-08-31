@@ -84,6 +84,7 @@ DEFAULT_HOTKEYS = {
     "font_decrease": "Ctrl+minus",
     "toc": "Ctrl+t",
     "toggle_header": "Ctrl+h",
+    "toggle_reader_mode": "Ctrl+b",
 }
 
 HOTKEYS = dict(DEFAULT_HOTKEYS)
@@ -125,17 +126,10 @@ FONT_FAMILY = "JetBrainsMono Nerd Font"
 
 STYLESHEET = """
 <style>
-  :root {{
-    color-scheme: dark;
-    --bg: {background};
-    --fg: {foreground};
-    --muted: {muted};
-    --accent: {accent};
-  }}
   html, body {{
     margin: 0;
     padding: 0;
-    background: transparent !important;
+    background: {content_bg} !important;
     color: {foreground} !important;
     font-family: {font_family}, "JetBrains Mono", monospace;
     font-size: {font_size}px;
@@ -144,7 +138,7 @@ STYLESHEET = """
     height: 100%;
   }}
   #container, .page, #source {{
-    background: transparent !important;
+    background: {content_bg} !important;
   }}
   #container {{
     color: {foreground} !important;
@@ -387,6 +381,7 @@ class OmarchyReader(Gtk.Application):
         self.chapters = []
         self.chapter_index = 0
         self.font_size = 18
+        self.reading_mode = "dark"
         self.window = None
         self.webview = None
         self._is_loading = False
@@ -661,8 +656,13 @@ class OmarchyReader(Gtk.Application):
         )
 
     def _apply_webview_bg(self):
+        if getattr(self, "webview", None) is None:
+            return
         color = Gdk.RGBA()
-        color.parse(THEME["background"])
+        if getattr(self, "reading_mode", "dark") == "light":
+            color.parse("#f5f5f4")
+        else:
+            color.parse(THEME["background"])
         self.webview.set_background_color(color)
 
     def _start_theme_monitor(self):
@@ -752,11 +752,24 @@ class OmarchyReader(Gtk.Application):
         return True
 
     def _styles(self, top_padding=60, side_padding=64, bottom_padding=80):
+        if getattr(self, "reading_mode", "dark") == "light":
+            bg = "#f5f5f4"
+            fg = "#1a1a1a"
+            muted = "#555555"
+            accent = "#1f6feb"
+            content_bg = "#f5f5f4"
+        else:
+            bg = THEME["background"]
+            fg = THEME["foreground"]
+            muted = THEME["color11"]
+            accent = THEME["accent"]
+            content_bg = "transparent"
         return STYLESHEET.format(
-            background=THEME["background"],
-            foreground=THEME["foreground"],
-            muted=THEME["color11"],
-            accent=THEME["accent"],
+            background=bg,
+            foreground=fg,
+            muted=muted,
+            accent=accent,
+            content_bg=content_bg,
             selection_background=THEME["selection_background"],
             selection_foreground=THEME["selection_foreground"],
             font_family=FONT_FAMILY,
@@ -1093,6 +1106,9 @@ class OmarchyReader(Gtk.Application):
         if self._hotkey_matches(HOTKEYS.get("toggle_header"), keyname, state):
             self._toggle_header()
             return True
+        if self._hotkey_matches(HOTKEYS.get("toggle_reader_mode"), keyname, state):
+            self._toggle_reader_mode()
+            return True
         if self._hotkey_matches(HOTKEYS.get("font_increase"), keyname, state):
             self.change_font_size(self.font_size + 2)
             return True
@@ -1116,6 +1132,21 @@ class OmarchyReader(Gtk.Application):
             self.on_open()
             return True
         return False
+
+    def _toggle_reader_mode(self):
+        """Toggle the reading surface between dark (theme) and light modes.
+
+        Dark mode uses the theme's light-on-dark colors with a transparent
+        background. Light mode uses dark text on a light background for high
+        contrast. Reloads the current view to apply the new colors.
+        """
+        self.reading_mode = "light" if self.reading_mode != "light" else "dark"
+        if getattr(self, "webview", None) is not None:
+            if self.chapters:
+                self._do_load_chapter(self.chapter_index)
+            else:
+                self.show_welcome()
+        self._apply_webview_bg()
 
     def _toggle_header(self):
         """Show or hide the header bar (which also hides the window close/X button)."""
