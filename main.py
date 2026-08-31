@@ -84,6 +84,9 @@ DEFAULT_HOTKEYS = {
     "font_decrease": "Ctrl+minus",
     "toc": "Ctrl+t",
     "toggle_header": "Ctrl+h",
+    "toggle_reader_mode": "Ctrl+b",
+    "page_next": "Ctrl+Right",
+    "page_prev": "Ctrl+Left",
 }
 
 HOTKEYS = dict(DEFAULT_HOTKEYS)
@@ -125,40 +128,42 @@ FONT_FAMILY = "JetBrainsMono Nerd Font"
 
 STYLESHEET = """
 <style>
-  :root {{
-    color-scheme: dark;
-    --bg: {background};
-    --fg: {foreground};
-    --muted: {muted};
-    --accent: {accent};
-  }}
   html, body {{
     margin: 0;
     padding: 0;
-    background: transparent;
-    color: var(--fg);
+    background: {content_bg} !important;
+    color: {foreground} !important;
     font-family: {font_family}, "JetBrains Mono", monospace;
     font-size: {font_size}px;
     line-height: 1.7;
     overflow: hidden;
     height: 100%;
   }}
+  #container, .page, #source {{
+    background: {content_bg} !important;
+  }}
+  #container {{
+    color: {foreground} !important;
+  }}
+  #container p, #container span, #container li, #container td, #container div {{
+    color: {foreground} !important;
+  }}
   body {{
     box-sizing: border-box;
     padding: 0 {side_padding}px;
   }}
   h1, h2, h3, h4, h5, h6 {{
-    color: var(--accent);
+    color: {accent};
     line-height: 1.3;
     margin: 1.4em 0 0.6em;
   }}
   p {{ margin: 0 0 1.1em; }}
-  a {{ color: var(--fg); text-decoration: underline; }}
+  a {{ color: {foreground}; text-decoration: underline; }}
   blockquote {{
-    border-left: 3px solid var(--accent);
+    border-left: 3px solid {accent};
     margin: 1em 0;
     padding-left: 1em;
-    color: var(--muted);
+    color: {muted};
   }}
   img {{ max-width: 100%; height: auto; border-radius: 4px; }}
   code {{
@@ -378,6 +383,7 @@ class OmarchyReader(Gtk.Application):
         self.chapters = []
         self.chapter_index = 0
         self.font_size = 18
+        self.reading_mode = "dark"
         self.window = None
         self.webview = None
         self._is_loading = False
@@ -405,6 +411,14 @@ class OmarchyReader(Gtk.Application):
         win = Gtk.ApplicationWindow(application=self)
         win.set_title("Omarchy Reader")
         win.set_default_size(900, 700)
+
+        # Enable real window transparency: the reading surface uses a
+        # semi-transparent background so the desktop subtly shows through.
+        win.set_app_paintable(True)
+        screen = win.get_screen()
+        rgba_visual = screen.get_rgba_visual()
+        if rgba_visual is not None:
+            win.set_visual(rgba_visual)
 
         self._apply_theme_css()
 
@@ -446,9 +460,11 @@ class OmarchyReader(Gtk.Application):
 
         self.webview = WebKit2.WebView.new_with_user_content_manager(self.user_content)
         self.webview.set_settings(settings)
+        self.webview.set_app_paintable(True)
         self.webview.connect("context-menu", self._suppress_menu)
         self.webview.connect("load-changed", self.on_load_changed)
         self._apply_webview_bg()
+        self._apply_user_stylesheet()
 
         scroller = Gtk.ScrolledWindow()
         scroller.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.NEVER)
@@ -652,9 +668,48 @@ class OmarchyReader(Gtk.Application):
         )
 
     def _apply_webview_bg(self):
+        if getattr(self, "webview", None) is None:
+            return
         color = Gdk.RGBA()
-        color.parse(THEME["background"])
+        if getattr(self, "reading_mode", "dark") == "light":
+            color.parse("#f5f5f4")
+        else:
+            color.parse(THEME["background"])
+        # Semi-transparent so the desktop subtly shows through.
+        color.alpha = 0.85
         self.webview.set_background_color(color)
+
+    def _apply_user_stylesheet(self):
+        """Inject the reading text color at USER style level.
+
+        The in-page <style> color rules are ignored by WebKitGTK for body
+        text in dark mode (text renders black regardless), so we force the
+        color through the UserContentManager, which beats page/UA styles.
+        """
+        if getattr(self, "user_content", None) is None:
+            return
+        self.user_content.remove_all_style_sheets()
+        if getattr(self, "reading_mode", "dark") == "light":
+            fg, link = "#1a1a1a", "#1f6feb"
+        else:
+            fg, link = "#ffffff", "#93c5fd"
+        size = getattr(self, "font_size", 18)
+        css = (
+            "html, body, #container, #container *, #source * "
+            "{{ color: {fg} !important; }} "
+            "html, body, #container "
+            "{{ font-size: {size}px !important; }} "
+            "#container a, #container a *, #source a, #source a * "
+            "{{ color: {link} !important; }}"
+        ).format(fg=fg, link=link, size=size)
+        sheet = WebKit2.UserStyleSheet(
+            css,
+            WebKit2.UserContentInjectedFrames.TOP_FRAME,
+            WebKit2.UserStyleLevel.USER,
+            None,
+            None,
+        )
+        self.user_content.add_style_sheet(sheet)
 
     def _start_theme_monitor(self):
         """Watch the live omarchy palette and re-render when the theme changes.
@@ -722,6 +777,7 @@ class OmarchyReader(Gtk.Application):
         self._apply_theme_css()
         if self.webview is not None:
             self._apply_webview_bg()
+            self._apply_user_stylesheet()
         # Re-render the current view so colors are picked up live.
         if self.chapters:
             self._do_load_chapter(self.chapter_index)
@@ -743,11 +799,25 @@ class OmarchyReader(Gtk.Application):
         return True
 
     def _styles(self, top_padding=60, side_padding=64, bottom_padding=80):
+        if getattr(self, "reading_mode", "dark") == "light":
+            bg = "#f5f5f4"
+            fg = "#1a1a1a"
+            muted = "#555555"
+            accent = "#1f6feb"
+        else:
+            bg = THEME["background"]
+            fg = "#ffffff"
+            muted = THEME["color11"]
+            accent = THEME["accent"]
+        # The page itself stays transparent in both modes; the semi-transparent
+        # webview background (set per-mode) provides the color.
+        content_bg = "transparent"
         return STYLESHEET.format(
-            background=THEME["background"],
-            foreground=THEME["foreground"],
-            muted=THEME["color11"],
-            accent=THEME["accent"],
+            background=bg,
+            foreground=fg,
+            muted=muted,
+            accent=accent,
+            content_bg=content_bg,
             selection_background=THEME["selection_background"],
             selection_foreground=THEME["selection_foreground"],
             font_family=FONT_FAMILY,
@@ -921,9 +991,29 @@ class OmarchyReader(Gtk.Application):
 
     def _extract_body(self, content):
         m = re.search(r"<body[^>]*>(.*?)</body>", content, re.S | re.I | re.DOTALL)
-        if m:
-            return m.group(1)
-        return content
+        body = m.group(1) if m else content
+
+        # Drop anything that would inject its own colors/styles and override
+        # the reader's theme: <style>, <link>, <base>, and inline style
+        # attributes that set color or background.
+        body = re.sub(r"<style[\s\S]*?</style>", "", body, flags=re.I)
+        body = re.sub(r"<link\b[^>]*>", "", body, flags=re.I)
+        body = re.sub(r"<base\b[^>]*/?>", "", body, flags=re.I)
+
+        def neutral_style(attr):
+            value = re.sub(
+                r"([a-zA-Z-]*background[a-zA-Z-]*|color)\s*:\s*[^;\"']*;?",
+                "",
+                attr.group(1),
+                flags=re.I,
+            ).strip()
+            if value:
+                return 'style="' + value.rstrip("; ") + '"'
+            return ""
+
+        body = re.sub(r'style\s*=\s*"([^"]*)"', neutral_style, body, flags=re.I)
+        body = re.sub(r"style\s*=\s*'([^']*)'", neutral_style, body, flags=re.I)
+        return body
 
     # ---------------- Chapter loading ----------------
     def _do_load_chapter(self, index):
@@ -1064,11 +1154,20 @@ class OmarchyReader(Gtk.Application):
         if self._hotkey_matches(HOTKEYS.get("toggle_header"), keyname, state):
             self._toggle_header()
             return True
+        if self._hotkey_matches(HOTKEYS.get("toggle_reader_mode"), keyname, state):
+            self._toggle_reader_mode()
+            return True
         if self._hotkey_matches(HOTKEYS.get("font_increase"), keyname, state):
             self.change_font_size(self.font_size + 2)
             return True
         if self._hotkey_matches(HOTKEYS.get("font_decrease"), keyname, state):
             self.change_font_size(self.font_size - 2)
+            return True
+        if self._hotkey_matches(HOTKEYS.get("page_next"), keyname, state):
+            self._run_js("nextPage();")
+            return True
+        if self._hotkey_matches(HOTKEYS.get("page_prev"), keyname, state):
+            self._run_js("prevPage();")
             return True
 
         if keyname == "Right":
@@ -1088,16 +1187,35 @@ class OmarchyReader(Gtk.Application):
             return True
         return False
 
+    def _toggle_reader_mode(self):
+        """Toggle the reading surface between dark (theme) and light modes.
+
+        Dark mode uses the theme's light-on-dark colors with a transparent
+        background. Light mode uses dark text on a light background for high
+        contrast. Reloads the current view to apply the new colors.
+        """
+        self.reading_mode = "light" if self.reading_mode != "light" else "dark"
+        self._apply_user_stylesheet()
+        if getattr(self, "webview", None) is not None:
+            if self.chapters:
+                self._do_load_chapter(self.chapter_index)
+            else:
+                self.show_welcome()
+        self._apply_webview_bg()
+
     def _toggle_header(self):
-        """Show or hide the header bar (which also hides the window close/X button)."""
+        """Show or hide the header bar (which also hides the window close/X button).
+
+        Hides/shows the headerbar widget itself rather than removing the
+        titlebar with set_titlebar(None): removing the titlebar from a live
+        CSD window was unreliable (and previously caused the WebKit
+        black-page repaint bug). Toggling widget visibility collapses the
+        titlebar area without that window churn.
+        """
         hb = getattr(self, "headerbar", None)
         if hb is None:
             return
-        if self.window.get_titlebar() is not None:
-            self.window.set_titlebar(None)
-        else:
-            hb.show_all()
-            self.window.set_titlebar(hb)
+        hb.set_visible(not hb.get_visible())
         self._repaint_webview()
 
     def _repaint_webview(self):
@@ -1116,6 +1234,7 @@ class OmarchyReader(Gtk.Application):
 
     def change_font_size(self, value):
         self.font_size = max(12, min(34, value))
+        self._apply_user_stylesheet()
         if self.chapters:
             self._do_load_chapter(self.chapter_index)
         else:
