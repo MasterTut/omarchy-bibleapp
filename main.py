@@ -2712,6 +2712,8 @@ document.addEventListener('click', function (e) {{
                 return True
 
         # Table of contents: arrow keys + Neo-Vim J/k navigation.
+        # h/l/left/right are consumed here so they don't page the reader behind
+        # the overlay.
         if self.toc_overlay.get_visible():
             if kn == "down" or kn == "j":
                 self._toc_move(1)
@@ -2721,6 +2723,8 @@ document.addEventListener('click', function (e) {{
                 return True
             if kn in ("return", "kp_enter"):
                 self._toc_activate_current()
+                return True
+            if kn in ("h", "l", "left", "right"):
                 return True
 
         # Home screen: j/k select between "Continue where you left off" and
@@ -2744,11 +2748,18 @@ document.addEventListener('click', function (e) {{
 
         # If focus is in the reader webview, let the page's JS handle the
         # reader navigation keys (j/k/up/down step verses, h/l/left/right page).
+        # If an overlay is visible, consume those keys instead so the reader
+        # doesn't page behind the overlay.
         if self._focus_in_webview():
-            if kn in ("j", "k", "up", "down", "h", "l", "left", "right"):
+            if self.toc_overlay.get_visible() or self._notes_overlay.get_visible():
+                if kn in ("j", "k", "up", "down", "h", "l", "left", "right"):
+                    return True
+            elif kn in ("j", "k", "up", "down", "h", "l", "left", "right"):
                 return False
 
         # Notes list navigation: j/k and up/down move the highlight, x deletes.
+        # h/l/left/right are consumed so they don't page the reader behind the
+        # notes overlay.
         if self._notes_zone == "list" and self._note_card_rows:
             if kn in ("j", "down"):
                 self._move_highlight(1)
@@ -2758,6 +2769,8 @@ document.addEventListener('click', function (e) {{
                 return True
             if kn == "x":
                 self._delete_highlighted()
+                return True
+            if kn in ("h", "l", "left", "right"):
                 return True
 
         # Paging: h/l and arrow/page keys always work.
