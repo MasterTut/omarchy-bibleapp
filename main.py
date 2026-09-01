@@ -655,6 +655,35 @@ function moveVerse(delta) {
   return true;
 }
 
+// Handle reader navigation directly in the page so it works even when the
+// GTK key-press-event path misses the event.
+document.addEventListener('keydown', function (e) {
+  var tag = e.target.tagName.toLowerCase();
+  if (tag === 'input' || tag === 'textarea' || tag === 'select') return;
+  if (e.ctrlKey || e.altKey || e.metaKey) return;
+  var key = e.key.toLowerCase();
+  if (key === 'j' || key === 'arrowdown') {
+    e.preventDefault();
+    moveVerse(1);
+    return;
+  }
+  if (key === 'k' || key === 'arrowup') {
+    e.preventDefault();
+    moveVerse(-1);
+    return;
+  }
+  if (key === 'l' || key === 'arrowright') {
+    e.preventDefault();
+    nextPage();
+    return;
+  }
+  if (key === 'h' || key === 'arrowleft') {
+    e.preventDefault();
+    prevPage();
+    return;
+  }
+});
+
 function showPage(idx) {
   if (!state.ready || state.pages === 0) return 0;
   if (idx < 0) idx = 0;
@@ -838,11 +867,6 @@ class OmarchyReader(Gtk.Application):
         self.webview.set_app_paintable(True)
         self.webview.connect("context-menu", self._suppress_menu)
         self.webview.connect("load-changed", self.on_load_changed)
-        # Also catch keys on the WebView itself: when the scroll/reader widget
-        # has focus, WebKit can swallow some Ctrl combos before they bubble up
-        # to the window handler. A handler that returns True stops propagation,
-        # so only one of the two handlers runs per event.
-        self.webview.connect("key-press-event", self.on_key_pressed_raw)
         self._apply_webview_bg()
         self._apply_user_stylesheet()
 
@@ -1698,8 +1722,8 @@ class OmarchyReader(Gtk.Application):
             ("Ctrl + [ / Ctrl + P", "Home / choose a translation"),
             ("Ctrl + B", "Toggle reader mode"),
             ("Ctrl + O", "Open a book file"),
-            ("H / L", "Previous / next page (left / right)"),
-            ("J / K", "Notes highlighted: move up / down · content: step verses (j down, k up)"),
+            ("H / L / ← / →", "Previous / next page (left / right)"),
+            ("J / K / ↑ / ↓", "Notes highlighted: move up / down · content: step verses (j/↓ down, k/↑ up)"),
             ("Home: j/k", "Select Continue where you left off / Translations, Enter"),
             ("x", "Delete the highlighted note"),
             ("Ctrl + Shift + +/-", "Grow / shrink note panel"),
@@ -2582,6 +2606,19 @@ document.addEventListener('click', function (e) {{
             widget = widget.get_parent()
         return False
 
+    def _focus_in_webview(self):
+        """Return True when keyboard focus is in the webview reader (not in an overlay)."""
+        widget = self.window.get_focus()
+        while widget is not None:
+            if widget is self.webview:
+                return True
+            if widget is getattr(self, "_notes_overlay", None):
+                return False
+            if widget is getattr(self, "toc_overlay", None):
+                return False
+            widget = widget.get_parent()
+        return False
+
     def on_key_pressed_raw(self, widget, event):
         keyname = Gdk.keyval_name(event.keyval)
         kn = keyname.lower() if keyname else ""
@@ -2705,56 +2742,35 @@ document.addEventListener('click', function (e) {{
         if self._focus_in_text_input():
             return False
 
-        # Plain letter hotkeys. Guard against Ctrl so the Ctrl+letter section
-        # above has the only say (prevents Ctrl+L from falling through to nextPage
-        # when the keyval name is uppercase "L").
-        if not ctrl:
-            # H/L always go left/right (previous/next page).
-            if kn == "h":
-                self._run_js("prevPage();")
-                return True
-            if kn == "l":
-                self._run_js("nextPage();")
-                return True
+        # If focus is in the reader webview, let the page's JS handle the
+        # reader navigation keys (j/k/up/down step verses, h/l/left/right page).
+        if self._focus_in_webview():
+            if kn in ("j", "k", "up", "down", "h", "l", "left", "right"):
+                return False
 
-            # J down / K up: navigate the highlighted note, or step
-            # verse-by-verse through the content.
-            if kn == "j":
-                if (
-                    self._active_section == "notes"
-                    and self._note_card_rows
-                    and self._notes_zone == "list"
-                ):
-                    self._move_highlight(1)
-                else:
-                    self._move_verse(1)
+        # Notes list navigation: j/k and up/down move the highlight, x deletes.
+        if self._notes_zone == "list" and self._note_card_rows:
+            if kn in ("j", "down"):
+                self._move_highlight(1)
                 return True
-            if kn == "k":
-                if (
-                    self._active_section == "notes"
-                    and self._note_card_rows
-                    and self._notes_zone == "list"
-                ):
-                    self._move_highlight(-1)
-                else:
-                    self._move_verse(-1)
+            if kn in ("k", "up"):
+                self._move_highlight(-1)
                 return True
-
-            # x deletes the highlighted note when a note is highlighted.
-            if kn == "x" and self._notes_zone == "list":
+            if kn == "x":
                 self._delete_highlighted()
                 return True
 
-        if kn == "right":
-            self._run_js("nextPage();")
-            return True
-        elif kn == "left":
+        # Paging: h/l and arrow/page keys always work.
+        if kn in ("h", "left"):
             self._run_js("prevPage();")
             return True
-        elif kn == "page_down" or kn == "space":
+        if kn in ("l", "right"):
             self._run_js("nextPage();")
             return True
-        elif kn == "page_up":
+        if kn == "page_down" or kn == "space":
+            self._run_js("nextPage();")
+            return True
+        if kn == "page_up":
             self._run_js("prevPage();")
             return True
         return False

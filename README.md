@@ -48,9 +48,9 @@ typography and layout while staying true to the Omarchy look.
 - `Ctrl + O` — open a book file
 - On the home screen: `j` / `k` select Continue where you left off /
   Translations, Enter opens
-- `H` / `L` — previous / next page (always left / right)
-- `J` / `K` (case-insensitive) — with a note highlighted: move up / down the
-  notes; with content focused: step through the verses (j down, k up)
+- `H` / `L` / `←` / `→` — previous / next page (always left / right)
+- `J` / `K` / `↑` / `↓` (case-insensitive) — with a note highlighted: move up /
+  down the notes; with content focused: step through the verses (j/↓ down, k/↑ up)
 - `x` — delete the highlighted note
 - `Ctrl + Shift + +/-` — grow / shrink the notes panel
 
