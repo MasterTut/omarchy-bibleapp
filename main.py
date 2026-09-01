@@ -575,6 +575,11 @@ function paginate() {
 
   state.charStarts = charStarts;
   state.pages = pages.length;
+  state.verseStarts = [];
+  for (var p = 0; p < pages.length; p++) {
+    var m = pages[p].match(/data-vn="(\d+)"/);
+    state.verseStarts[p] = m ? parseInt(m[1], 10) : null;
+  }
   container.innerHTML = '';
   for (var p = 0; p < pages.length; p++) {
     var div = document.createElement('div');
@@ -709,6 +714,40 @@ function scrollContent(delta) {
   }
 }
 
+function goToVerse(vn) {
+  if (!state.ready || state.pages === 0) return false;
+  vn = parseInt(vn, 10) || 0;
+  if (vn <= 0) return false;
+  var starts = state.verseStarts || [];
+  var pageIdx = 0;
+  for (var i = 0; i < starts.length; i++) {
+    if (starts[i] != null && starts[i] <= vn) pageIdx = i;
+  }
+  var pages = document.querySelectorAll('.page');
+  if (pages.length === 0) return false;
+  for (var i = 0; i < pages.length; i++) {
+    pages[i].className = i === pageIdx ? 'page active' : 'page';
+  }
+  state.current = pageIdx;
+  window.scrollTo(0, 0);
+  post({type:'page', cur: pageIdx, pages: state.pages, pch: currentCharStart(pageIdx)});
+  var els = verseElems();
+  var found = null;
+  for (var i = 0; i < els.length; i++) {
+    if (parseInt(els[i].getAttribute('data-vn'), 10) === vn) {
+      found = els[i];
+      break;
+    }
+  }
+  if (found) {
+    applyVerseHighlight(found, vn);
+  } else {
+    clearVerseHighlight();
+    post({type:'verse', verse: 0});
+  }
+  return true;
+}
+
 function nextPage() {
   if (!state.ready) return -2;
   if (state.pages === 0) { post({type:'edge', dir:'next'}); return -1; }
@@ -767,12 +806,18 @@ class OmarchyReader(Gtk.Application):
         self.bookdir = None
         self.book_path = None
         self.chapters = []
+        self._chapter_verses = {}
         self.chapter_index = 0
         self.current_page = 0
         self.current_ch = 0
         self.page_count = 0
         self.font_size = 18
         self.reading_mode = "dark"
+        self._toc_books = []
+        self._toc_mode = "books"
+        self._toc_book_idx = 0
+        self._toc_chapter_idx = 0
+        self._toc_verse_idx = 0
         self.window = None
         self.webview = None
         self._is_loading = False
@@ -939,9 +984,16 @@ class OmarchyReader(Gtk.Application):
         bar.set_margin_top(12)
         bar.set_margin_bottom(8)
 
-        label = Gtk.Label(label="Table of Contents")
+        back_btn = Gtk.Button(label="Back")
+        back_btn.get_style_context().add_class("toc-back")
+        back_btn.connect("clicked", self._on_toc_back)
+        self.toc_back_btn = back_btn
+        bar.pack_start(back_btn, False, False, 0)
+
+        label = Gtk.Label(label="Books")
         label.get_style_context().add_class("title-label")
         label.set_halign(Gtk.Align.START)
+        self.toc_title_label = label
         bar.pack_start(label, True, True, 0)
 
         count = Gtk.Label(label="")
@@ -969,39 +1021,83 @@ class OmarchyReader(Gtk.Application):
         self.toc_overlay.pack_start(scroller, True, True, 0)
 
     def _refresh_toc(self):
-        """(Re)populate the chapter list from the current book."""
-        rows = self.toc_list.get_children()
-        for r in rows:
+        """(Re)populate the TOC list based on the current mode."""
+        for r in self.toc_list.get_children():
             self.toc_list.remove(r)
         self._toc_row_index = {}
         self._toc_rows = []
-        for i, chapter in enumerate(self.chapters):
-            _, title, _, _ = chapter
+
+        if not self._toc_books:
+            empty = Gtk.Label(label="No table of contents available.")
+            empty.get_style_context().add_class("progress-label")
+            self.toc_list.add(empty)
+            self.toc_title_label.set_text("Contents")
+            self.toc_count.set_text("")
+            self.toc_back_btn.set_visible(False)
+            return
+
+        items = []
+        title = "Books"
+        if self._toc_mode == "books":
+            title = "Books"
+            items = [
+                (b["title"], {"type": "book", "index": i})
+                for i, b in enumerate(self._toc_books)
+            ]
+        elif self._toc_mode == "chapters":
+            book = self._toc_books[self._toc_book_idx]
+            title = book["title"]
+            items = [
+                (
+                    c["title"],
+                    {
+                        "type": "chapter",
+                        "index": c["index"],
+                        "book_idx": self._toc_book_idx,
+                        "chapter_in_book_idx": ci,
+                    },
+                )
+                for ci, c in enumerate(book["chapters"])
+            ]
+        elif self._toc_mode == "verses":
+            book = self._toc_books[self._toc_book_idx]
+            chapter = book["chapters"][self._toc_chapter_idx]
+            title = f"{book['title']} · {chapter['title']}"
+            verse_list = self._chapter_verses.get(chapter["index"], [])
+            items = [
+                (
+                    f"Verse {vn}",
+                    {
+                        "type": "verse",
+                        "verse": vn,
+                        "chapter_index": chapter["index"],
+                    },
+                )
+                for vn in verse_list
+            ]
+
+        self.toc_title_label.set_text(title)
+        self.toc_back_btn.set_visible(self._toc_mode != "books")
+        self.toc_count.set_text(
+            f"{len(items)} item{'s' if len(items) != 1 else ''}"
+        )
+
+        for i, (label, data) in enumerate(items):
             row = Gtk.ListBoxRow()
             self._toc_row_index[row] = i
             self._toc_rows.append(row)
-            num = Gtk.Label(label=str(i + 1))
-            num.get_style_context().add_class("toc-num")
-            num.set_width_chars(4)
-            num.set_xalign(1.0)
-            num.set_valign(Gtk.Align.START)
-
-            txt = Gtk.Label(label=title or f"Chapter {i + 1}")
+            row._toc_data = data
+            txt = Gtk.Label(label=label)
             txt.set_xalign(0.0)
             txt.set_line_wrap(True)
             txt.set_halign(Gtk.Align.START)
             txt.get_style_context().add_class("toc-title")
-            if i == self.chapter_index:
+            if self._toc_mode == "chapters" and data.get("index") == self.chapter_index:
                 txt.get_style_context().add_class("toc-current")
-
-            box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-            box.pack_start(num, False, False, 0)
-            box.pack_start(txt, True, True, 0)
-            row.add(box)
+            row.add(txt)
             self.toc_list.add(row)
-        self.toc_count.set_text(
-            f"{len(self.chapters)} chapter{'s' if len(self.chapters) != 1 else ''}"
-        )
+
+        self.toc_list.show_all()
 
     def _toggle_toc(self):
         if self.toc_overlay.get_visible():
@@ -1009,32 +1105,42 @@ class OmarchyReader(Gtk.Application):
         else:
             self._show_toc()
 
+    def _toc_locate_current_chapter(self):
+        """Return (book_idx, chapter_in_book_idx) for the current chapter."""
+        for bi, book in enumerate(self._toc_books):
+            for ci, chapter in enumerate(book["chapters"]):
+                if chapter["index"] == self.chapter_index:
+                    return bi, ci
+        return 0, 0
+
     def _show_toc(self):
-        if not self.chapters:
+        if not self.chapters or not self._toc_books:
             return
         self._hide_notes()
         self._hide_settings()
         self._hide_help()
+        self._toc_mode = "books"
+        self._toc_book_idx, self._toc_chapter_idx = self._toc_locate_current_chapter()
+        self._toc_verse_idx = 0
         self._refresh_toc()
         self.toc_overlay.show_all()
         self.toc_overlay.set_visible(True)
-        # Highlight + focus the current chapter row so arrow/J/k navigation
-        # has a starting point.
-        current = min(self.chapter_index, len(self._toc_rows) - 1)
-        if self._toc_rows:
-            self.toc_list.select_row(self._toc_rows[current])
+        # Highlight the book containing the current chapter.
+        if self._toc_rows and 0 <= self._toc_book_idx < len(self._toc_rows):
+            self.toc_list.select_row(self._toc_rows[self._toc_book_idx])
             self.toc_list.grab_focus()
 
     def _hide_toc(self):
         self.toc_overlay.set_visible(False)
+        if self.webview and not self._on_home:
+            self.webview.grab_focus()
 
     def _toc_selected_index(self):
         row = self.toc_list.get_selected_row()
         if row is not None:
             return self._toc_row_index.get(row)
-        # Fall back to the current chapter if nothing is selected yet.
         if self._toc_rows:
-            return self.chapter_index
+            return 0
         return None
 
     def _toc_move(self, offset):
@@ -1055,12 +1161,54 @@ class OmarchyReader(Gtk.Application):
             self._on_toc_row_activated(self.toc_list, row)
 
     def _on_toc_row_activated(self, listbox, row):
-        index = self._toc_row_index.get(row)
-        if index is None:
+        data = getattr(row, "_toc_data", None)
+        if not data:
+            return
+        dtype = data.get("type")
+        if dtype == "book":
+            self._toc_mode = "chapters"
+            self._toc_book_idx = data.get("index", 0)
+            self._toc_chapter_idx = 0
+            self._refresh_toc()
+            if self._toc_rows:
+                self.toc_list.select_row(self._toc_rows[0])
+                self.toc_list.grab_focus()
+            return
+        if dtype == "chapter":
+            chapter_index = data.get("index", 0)
+            self._toc_chapter_idx = data.get("chapter_in_book_idx", 0)
+            self._do_load_chapter(chapter_index)
+            self._fill_verse_numbers(chapter_index)
+            self._toc_mode = "verses"
+            self._refresh_toc()
+            if self._toc_rows:
+                self.toc_list.select_row(self._toc_rows[0])
+                self.toc_list.grab_focus()
+            return
+        if dtype == "verse":
+            vn = data.get("verse", 0)
+            self._run_js(f"goToVerse({vn});")
+            self._hide_toc()
+            return
+
+    def _on_toc_back(self, *args):
+        if not self.toc_overlay.get_visible():
+            return
+        if self._toc_mode == "verses":
+            self._toc_mode = "chapters"
+            self._refresh_toc()
+            if self._toc_rows and 0 <= self._toc_chapter_idx < len(self._toc_rows):
+                self.toc_list.select_row(self._toc_rows[self._toc_chapter_idx])
+                self.toc_list.grab_focus()
+            return
+        if self._toc_mode == "chapters":
+            self._toc_mode = "books"
+            self._refresh_toc()
+            if self._toc_rows and 0 <= self._toc_book_idx < len(self._toc_rows):
+                self.toc_list.select_row(self._toc_rows[self._toc_book_idx])
+                self.toc_list.grab_focus()
             return
         self._hide_toc()
-        if 0 <= index < len(self.chapters) and index != self.chapter_index:
-            self._do_load_chapter(index)
 
     # ---------------- Notes ----------------
     def _build_notes_overlay(self):
@@ -1713,7 +1861,7 @@ class OmarchyReader(Gtk.Application):
         bar.pack_end(close, False, False, 0)
 
         rows = [
-            ("Ctrl + T", "Table of contents (arrows / j / k, Enter)"),
+            ("Ctrl + T", "Table of contents: books · chapters · verses (j/k, Enter, h/Back)"),
             ("Ctrl + N", "Notes panel (New button / Ctrl+Enter to add)"),
             ("Ctrl + h", "Jump to notes list (works while typing)"),
             ("Ctrl + l", "Add a note / edit the highlighted note"),
@@ -2251,6 +2399,141 @@ document.addEventListener('click', function (e) {{
                 title = getattr(item, "title", None) or os.path.basename(name)
                 self.chapters.append(("", title, path, name))
 
+        self._build_toc_tree()
+
+    def _find_chapter_index_by_href(self, href):
+        """Map a TOC href to the chapter index in self.chapters."""
+        name = self._resolve_href(href)
+        if not name:
+            return None
+        target = name.lstrip("./")
+        for i, (_, _, _, ch_name) in enumerate(self.chapters):
+            if ch_name.lstrip("./") == target:
+                return i
+        return None
+
+    def _build_toc_tree(self):
+        """Build a hierarchical book -> chapter tree from the TOC."""
+        books = []
+        raw = getattr(self.book, "toc", None) or []
+        if isinstance(raw, list):
+            for node in raw:
+                book = self._tree_from_ebooklib_node(node)
+                if book and book["chapters"]:
+                    books.append(book)
+        if not books:
+            books = self._tree_from_ncx()
+        if not books:
+            books = self._tree_from_flat_chapters()
+        self._toc_books = books
+
+    def _tree_from_ebooklib_node(self, node):
+        """Convert an ebooklib TOC node (Link or tuple) into a book dict."""
+        if not isinstance(node, tuple):
+            return None
+        link, children = node[0], node[1]
+        if isinstance(link, str) or link is None:
+            return None
+        title = getattr(link, "title", "") or "Book"
+        chapters = []
+        for child in children:
+            ctitle, cidx = self._chapter_from_toc_link(child)
+            if cidx is not None:
+                chapters.append({"title": ctitle, "index": cidx, "verses": []})
+        return {"title": title, "chapters": chapters}
+
+    def _chapter_from_toc_link(self, node):
+        """Return (title, chapter_index) from a leaf ebooklib TOC link."""
+        if isinstance(node, tuple):
+            link = node[0]
+        else:
+            link = node
+        if isinstance(link, str) or link is None:
+            return None, None
+        title = getattr(link, "title", "") or "Chapter"
+        href = getattr(link, "href", "")
+        idx = self._find_chapter_index_by_href(href)
+        return title, idx
+
+    def _tree_from_ncx(self):
+        """Build a book tree from the NCX navMap hierarchy."""
+        import xml.etree.ElementTree as ET
+
+        books = []
+        ncx = None
+        for item in self.book.get_items():
+            if item.get_name().lower().endswith(("toc.ncx", ".ncx")):
+                ncx = item
+                break
+        if ncx is None:
+            return books
+        try:
+            raw = (ncx.get_content() or b"").decode("utf-8", "replace")
+            root = ET.fromstring(raw)
+        except Exception:
+            return books
+
+        ns = ""
+        if root.tag.startswith("{"):
+            ns = root.tag.split("}")[0] + "}"
+
+        navmap = root.find(f"{ns}navMap")
+        if navmap is None:
+            return books
+
+        def navpoint_to_book(navpoint):
+            label = navpoint.find(f"{ns}navLabel/{ns}text")
+            content = navpoint.find(f"{ns}content")
+            title = (label.text or "").strip() if label is not None else ""
+            src = content.get("src", "") if content is not None else ""
+            children = navpoint.findall(f"{ns}navPoint")
+            chapters = []
+            for child in children:
+                clabel = child.find(f"{ns}navLabel/{ns}text")
+                ccontent = child.find(f"{ns}content")
+                ctitle = (clabel.text or "").strip() if clabel is not None else ""
+                csrc = ccontent.get("src", "") if ccontent is not None else ""
+                cidx = self._find_chapter_index_by_href(csrc)
+                if cidx is not None:
+                    chapters.append({"title": ctitle, "index": cidx, "verses": []})
+            if chapters:
+                return {"title": title or "Book", "chapters": chapters}
+            return None
+
+        for navpoint in navmap.findall(f"{ns}navPoint"):
+            book = navpoint_to_book(navpoint)
+            if book:
+                books.append(book)
+        return books
+
+    def _tree_from_flat_chapters(self):
+        """Group flat chapter titles like 'Genesis 1' into books by name."""
+        groups = {}
+        for i, (_, title, _, _) in enumerate(self.chapters):
+            m = re.match(r"^(.*?)\s+(\d+)$", (title or "").strip())
+            book_title = m.group(1).strip() if m else "Book"
+            groups.setdefault(book_title, []).append(
+                {"title": title or f"Chapter {i + 1}", "index": i, "verses": []}
+            )
+        return [{"title": k, "chapters": v} for k, v in groups.items()]
+
+    def _fill_verse_numbers(self, chapter_index):
+        """Populate the verse list for a chapter by reading its HTML."""
+        if chapter_index in self._chapter_verses:
+            return
+        if not 0 <= chapter_index < len(self.chapters):
+            return
+        _, _, path, _ = self.chapters[chapter_index]
+        try:
+            with open(path, "rb") as f:
+                raw = f.read()
+            content = raw.decode("utf-8")
+        except Exception:
+            return
+        body = self._annotate_verses(self._extract_body(content))
+        numbers = sorted({int(n) for n in re.findall(r'data-vn="(\d+)"', body)})
+        self._chapter_verses[chapter_index] = numbers
+
     def _flatten_toc(self):
         """Return a flat list of (title, href) from the book's TOC.
 
@@ -2647,7 +2930,10 @@ document.addEventListener('click', function (e) {{
                 self._hide_help()
                 return True
             if self.toc_overlay.get_visible():
-                self._hide_toc()
+                if self._toc_mode in ("chapters", "verses"):
+                    self._on_toc_back()
+                else:
+                    self._hide_toc()
                 return True
             return False
 
@@ -2720,8 +3006,8 @@ document.addEventListener('click', function (e) {{
                 return True
 
         # Table of contents: arrow keys + Neo-Vim J/k navigation.
-        # h/l/left/right are consumed here so they don't page the reader behind
-        # the overlay.
+        # h/left goes back a level; l/right are consumed so they don't page the
+        # reader behind the overlay.
         if self.toc_overlay.get_visible():
             if kn == "down" or kn == "j":
                 self._toc_move(1)
@@ -2732,7 +3018,10 @@ document.addEventListener('click', function (e) {{
             if kn in ("return", "kp_enter"):
                 self._toc_activate_current()
                 return True
-            if kn in ("h", "l", "left", "right"):
+            if kn in ("h", "left"):
+                self._on_toc_back()
+                return True
+            if kn in ("l", "right"):
                 return True
 
         # Home screen: j/k select between "Continue where you left off" and
