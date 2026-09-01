@@ -11,7 +11,8 @@ typography and layout while staying true to the Omarchy look.
 
 - Bible translations browser (replaces recently opened)
 - Continue reading (last viewed book and page)
-- Page-specific notes (saved to JSON, bottom panel)
+- Page-specific notes (saved to JSON, bottom panel); a highlighted note can be
+  loaded into the editor with `Ctrl + l` and saved in place
 - Settings panel (`Ctrl + S`) with auto-hide top bar toggle (persisted to `settings.json`)
 - Toggleable header (`Ctrl + Shift + H`)
 - Table of contents (`Ctrl + T`) navigable with arrow keys and Neo-Vim `j`/`k`
@@ -33,8 +34,10 @@ typography and layout while staying true to the Omarchy look.
 - `Ctrl + T` — table of contents (arrow keys / `j` / `k` to move, Enter to open)
 - `Ctrl + N` — notes panel (Ctrl+Enter to add a note)
 - `Ctrl + S` — settings
-- `Ctrl + h/j/k/l` — cycle between sections (notes list → add a note → content);
-  `Ctrl + h` jumps straight to the notes list (even while typing a note)
+- `Ctrl + h` — jump to the notes list (works even while typing a note)
+- `Ctrl + l` — add a note / edit the highlighted note (loads it into the editor)
+- `Ctrl + j` / `Ctrl + k` — notes list: move the highlight (wraps at the ends);
+  elsewhere: cycle sections (notes list → add a note → content)
 - `Ctrl + Shift + K` — keybinding reference
 - `Ctrl + Shift + H` — toggle header
 - `Ctrl + [` / `Ctrl + P` — home / translations browser

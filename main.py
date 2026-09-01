@@ -638,10 +638,14 @@ function moveVerse(delta) {
     scrollContent(delta > 0 ? 70 : -70);
     return false;
   }
-  if (state.verseIdx < 0) state.verseIdx = 0;
-  state.verseIdx += delta;
-  if (state.verseIdx < 0) state.verseIdx = 0;
-  if (state.verseIdx >= els.length) state.verseIdx = els.length - 1;
+  if (state.verseIdx < 0) {
+    // First press: land on the first verse (or the last when going up).
+    state.verseIdx = delta > 0 ? 0 : els.length - 1;
+  } else {
+    state.verseIdx += delta;
+    if (state.verseIdx < 0) state.verseIdx = 0;
+    if (state.verseIdx >= els.length) state.verseIdx = els.length - 1;
+  }
   var el = els[state.verseIdx];
   applyVerseHighlight(el, el.getAttribute('data-vn'));
   return true;
@@ -1119,6 +1123,7 @@ class OmarchyReader(Gtk.Application):
         if not self.book_path or not self.chapters:
             return
         if section == "list":
+            self._editing_note = None
             self._active_section = "notes"
             self._show_notes()
             if self._note_card_rows:
@@ -1130,6 +1135,7 @@ class OmarchyReader(Gtk.Application):
             self._show_notes()
             self._set_notes_zone("editor")
         elif section == "content":
+            self._editing_note = None
             self._active_section = "content"
             self._set_notes_zone("editor")
             if self.webview:
@@ -1375,14 +1381,17 @@ class OmarchyReader(Gtk.Application):
                 adj.set_value(min(max(lo, adj.get_value()), max(0, hi - adj.get_page_size())))
             self.notes_scroller.queue_draw()
 
-    def _delete_highlighted(self):
-        if self._highlight_index < 0 or self._highlight_index >= len(self._note_card_rows):
-            return
+    def _highlight_note_key_index(self):
+        """Map the highlighted row to (key, index) in self.notes, or (None, None).
+
+        The on-screen list merges the char-anchored key with any legacy page
+        keys, so walk those lists in the same order to find the real location.
+        """
+        if self._highlight_index < 0 or not self._note_card_rows:
+            return None, None
         key = self._note_key()
         if not key:
-            return
-        # Delete at the same index across the merged view. Gather the merged
-        # list of actual per-key lists to target the correct one.
+            return None, None
         keys = []
         for k in [key] + self._legacy_note_keys():
             if k and k not in keys:
@@ -1393,10 +1402,35 @@ class OmarchyReader(Gtk.Application):
             if lst is None:
                 continue
             if idx < len(lst):
-                self._delete_note(k, idx)
-                self._move_highlight(0)
-                return
+                return k, idx
             idx -= len(lst)
+        return None, None
+
+    def _edit_from_list(self):
+        """Ctrl+l: load the highlighted note into the add-note editor for
+        editing, or open a fresh editor when nothing is highlighted."""
+        key, idx = self._highlight_note_key_index()
+        entry = None
+        if key is not None and idx is not None:
+            lst = self.notes.get(key)
+            if lst and 0 <= idx < len(lst):
+                entry = lst[idx]
+        self._editing_note = (key, idx) if entry is not None else None
+        if entry is not None:
+            text = str(entry.get("text", "")) if isinstance(entry, dict) else str(entry)
+            self.notes_buffer.set_text(text)
+            end = self.notes_buffer.get_end_iter()
+            self.notes_buffer.place_cursor(end)
+        self._set_section("editor")
+
+    def _delete_highlighted(self):
+        key, idx = self._highlight_note_key_index()
+        if key is None or idx is None:
+            return
+        lst = self.notes.get(key)
+        if lst and 0 <= idx < len(lst):
+            self._delete_note(key, idx)
+            self._move_highlight(0)
 
     def _on_note_textview_key(self, widget, event):
         if event.keyval in (Gdk.KEY_Return, Gdk.KEY_KP_Enter) and (
@@ -1420,10 +1454,19 @@ class OmarchyReader(Gtk.Application):
             return
         from datetime import datetime
 
-        entry = {"text": text, "ts": datetime.now().strftime("%Y-%m-%d %H:%M")}
-        if self._current_verse:
-            entry["verse"] = self._current_verse
-        self.notes.setdefault(key, []).append(entry)
+        if self._editing_note:
+            key, idx = self._editing_note
+            lst = self.notes.get(key)
+            if lst and 0 <= idx < len(lst):
+                lst[idx]["text"] = text
+                if self._current_verse:
+                    lst[idx]["verse"] = self._current_verse
+            self._editing_note = None
+        else:
+            entry = {"text": text, "ts": datetime.now().strftime("%Y-%m-%d %H:%M")}
+            if self._current_verse:
+                entry["verse"] = self._current_verse
+            self.notes.setdefault(key, []).append(entry)
         self._write_notes()
         self._refresh_notes()
 
@@ -1590,7 +1633,9 @@ class OmarchyReader(Gtk.Application):
         rows = [
             ("Ctrl + T", "Table of contents (arrows / j / k, Enter)"),
             ("Ctrl + N", "Notes panel (Ctrl+Enter to add)"),
-            ("Ctrl + h/j/k/l", "Cycle: notes list -> add note -> content"),
+            ("Ctrl + h", "Jump to notes list (works while typing)"),
+            ("Ctrl + l", "Add a note / edit the highlighted note"),
+            ("Ctrl + j / k", "Notes list: move highlight · elsewhere: cycle"),
             ("Ctrl + Shift + H", "Toggle header bar"),
             ("Ctrl + S", "Settings"),
             ("Ctrl + Shift + K", "Keybindings reference"),
@@ -2443,20 +2488,26 @@ document.addEventListener('click', function (e) {{
         return False
 
     def _hotkey_matches(self, binding, keyname, state):
-        """Return True when a configured binding (e.g. \"Ctrl+equal\") matches.
+        """Return True when a configured binding (e.g. "Ctrl+equal") matches.
 
-        Bindings are written as modifier + key name, e.g. Ctrl+t, Ctrl+Shift+h, or a
-        bare key name like t. Only Ctrl is supported right now.
+        Bindings are written as modifier + key name, e.g. Ctrl+t, Ctrl+Shift+h,
+        or a bare key name like t. Modifiers must match exactly, so a binding
+        without Shift never matches a Ctrl+Shift+... press.
         """
         if not binding:
             return False
         parts = [p.strip() for p in binding.split("+")]
-        want_ctrl = "ctrl" in [p.lower() for p in parts]
+        mods = [p.lower() for p in parts[:-1]]
         key = parts[-1]
-        if keyname != key:
+        if keyname.lower() != key.lower():
             return False
         has_ctrl = bool(state & Gdk.ModifierType.CONTROL_MASK)
-        return has_ctrl == want_ctrl
+        has_shift = bool(state & Gdk.ModifierType.SHIFT_MASK)
+        if has_ctrl != ("ctrl" in mods):
+            return False
+        if has_shift != ("shift" in mods):
+            return False
+        return True
 
     def _focus_in_text_input(self):
         """Return True when keyboard focus is inside a text-entry widget.
@@ -2504,13 +2555,29 @@ document.addEventListener('click', function (e) {{
             if shift and keyname == "h":
                 self._toggle_header()
                 return True
+            if shift and keyname in ("plus", "equal"):
+                self._grow_note_height()
+                return True
+            if shift and keyname == "minus":
+                self._shrink_note_height()
+                return True
             if not shift and keyname == "h":
                 # Ctrl+h always jumps to the highlight-able notes list
                 # (works even while typing a note).
                 self._set_section("list")
                 return True
-            if not shift and keyname in ("j", "k", "l"):
-                self._cycle_section()
+            if not shift and keyname == "l":
+                # Ctrl+l: from a highlighted note, load it for editing in the
+                # add-note editor; otherwise open a fresh editor.
+                self._edit_from_list()
+                return True
+            if not shift and keyname in ("j", "k"):
+                # Inside the notes list, j/k move the highlight (wrapping at
+                # the ends); elsewhere they cycle forward through sections.
+                if self._notes_zone == "list" and self._note_card_rows:
+                    self._move_highlight(1 if keyname == "j" else -1)
+                else:
+                    self._cycle_section()
                 return True
             if self._hotkey_matches(HOTKEYS.get("toc"), keyname, state):
                 self._toggle_toc()
@@ -2576,22 +2643,6 @@ document.addEventListener('click', function (e) {{
         # combos and Escape were already handled above.
         if self._focus_in_text_input():
             return False
-
-        # Note-panel height: Ctrl+Shift+Plus grows, Ctrl+Shift+Minus shrinks.
-        if (
-            keyname in ("plus", "equal")
-            and ctrl
-            and shift
-        ):
-            self._grow_note_height()
-            return True
-        if (
-            keyname == "minus"
-            and ctrl
-            and shift
-        ):
-            self._shrink_note_height()
-            return True
 
         # H/L always go left/right (previous/next page).
         if keyname in ("h", "H"):
