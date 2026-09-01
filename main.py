@@ -496,7 +496,7 @@ STYLESHEET = """
 """
 
 PAGE_JS = r"""
-var state = { pages: 0, current: 0, ready: false, reported: false, verseIdx: -1 };
+var state = { pages: 0, current: 0, ready: false, reported: false };
 
 function post(msg) {
   if (window.webkit && window.webkit.messageHandlers &&
@@ -604,7 +604,6 @@ function clearVerseHighlight() {
     all[i].classList.remove('verse-glow');
     all[i].classList.remove('v-highlight');
   }
-  state.verseIdx = -1;
 }
 
 function resetVerseHighlight() {
@@ -618,10 +617,15 @@ function verseElems() {
   return Array.prototype.slice.call(p.querySelectorAll('sup.v, span.v'));
 }
 
+function currentVerseEl() {
+  var p = document.querySelector('.page.active');
+  if (!p) return null;
+  return p.querySelector('.v-highlight');
+}
+
 function applyVerseHighlight(el, vn) {
   clearVerseHighlight();
   if (!el) return;
-  state.verseIdx = Array.prototype.indexOf.call(verseElems(), el);
   el.classList.add('v-highlight');
   var par = el.closest('p');
   if (par) par.classList.add('verse-glow');
@@ -638,31 +642,18 @@ function moveVerse(delta) {
     scrollContent(delta > 0 ? 70 : -70);
     return false;
   }
-  if (state.verseIdx < 0) {
-    // First press always lands on the first verse; j then walks down, k walks up.
-    state.verseIdx = 0;
-  } else {
-    state.verseIdx += delta;
-    if (state.verseIdx < 0) state.verseIdx = 0;
-    if (state.verseIdx >= els.length) state.verseIdx = els.length - 1;
+  var cur = currentVerseEl();
+  var idx = 0;
+  if (cur) {
+    var found = Array.prototype.indexOf.call(els, cur);
+    if (found >= 0) idx = found + delta;
   }
-  var el = els[state.verseIdx];
+  if (idx < 0) idx = 0;
+  if (idx >= els.length) idx = els.length - 1;
+  var el = els[idx];
   applyVerseHighlight(el, el.getAttribute('data-vn'));
   return true;
 }
-
-// Also handle reader navigation in the page itself so j/k/l/h keep working
-// even when the GTK signal misses the event.
-document.addEventListener('keydown', function (e) {
-  var tag = e.target.tagName.toLowerCase();
-  if (tag === 'input' || tag === 'textarea' || tag === 'select') return;
-  if (e.ctrlKey || e.altKey || e.metaKey) return;
-  var key = e.key.toLowerCase();
-  if (key === 'j') { e.preventDefault(); moveVerse(1); return; }
-  if (key === 'k') { e.preventDefault(); moveVerse(-1); return; }
-  if (key === 'h') { e.preventDefault(); prevPage(); return; }
-  if (key === 'l') { e.preventDefault(); nextPage(); return; }
-});
 
 function showPage(idx) {
   if (!state.ready || state.pages === 0) return 0;
