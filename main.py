@@ -834,6 +834,11 @@ class OmarchyReader(Gtk.Application):
         self.webview.set_app_paintable(True)
         self.webview.connect("context-menu", self._suppress_menu)
         self.webview.connect("load-changed", self.on_load_changed)
+        # Also catch keys on the WebView itself: when the scroll/reader widget
+        # has focus, WebKit can swallow some Ctrl combos before they bubble up
+        # to the window handler. A handler that returns True stops propagation,
+        # so only one of the two handlers runs per event.
+        self.webview.connect("key-press-event", self.on_key_pressed_raw)
         self._apply_webview_bg()
         self._apply_user_stylesheet()
 
@@ -1409,18 +1414,17 @@ class OmarchyReader(Gtk.Application):
     def _edit_from_list(self):
         """Ctrl+l: load the highlighted note into the add-note editor for
         editing, or open a fresh editor when nothing is highlighted."""
+        self._editing_note = None
         key, idx = self._highlight_note_key_index()
-        entry = None
         if key is not None and idx is not None:
             lst = self.notes.get(key)
             if lst and 0 <= idx < len(lst):
+                self._editing_note = {"key": key, "idx": idx}
                 entry = lst[idx]
-        self._editing_note = (key, idx) if entry is not None else None
-        if entry is not None:
-            text = str(entry.get("text", "")) if isinstance(entry, dict) else str(entry)
-            self.notes_buffer.set_text(text)
-            end = self.notes_buffer.get_end_iter()
-            self.notes_buffer.place_cursor(end)
+                text = str(entry.get("text", "")) if isinstance(entry, dict) else str(entry)
+                self.notes_buffer.set_text(text)
+                end = self.notes_buffer.get_end_iter()
+                self.notes_buffer.place_cursor(end)
         self._set_section("editor")
 
     def _delete_highlighted(self):
@@ -1454,19 +1458,26 @@ class OmarchyReader(Gtk.Application):
             return
         from datetime import datetime
 
-        if self._editing_note:
-            key, idx = self._editing_note
-            lst = self.notes.get(key)
+        # Editing an existing note loaded via Ctrl+l: update it in place.
+        edit = self._editing_note
+        self._editing_note = None
+        if edit:
+            lst = self.notes.get(edit.get("key"))
+            idx = edit.get("idx")
             if lst and 0 <= idx < len(lst):
                 lst[idx]["text"] = text
                 if self._current_verse:
                     lst[idx]["verse"] = self._current_verse
-            self._editing_note = None
-        else:
-            entry = {"text": text, "ts": datetime.now().strftime("%Y-%m-%d %H:%M")}
-            if self._current_verse:
-                entry["verse"] = self._current_verse
-            self.notes.setdefault(key, []).append(entry)
+                self._write_notes()
+                self._refresh_notes()
+                return
+            # The original note is gone (deleted/navigated away): fall
+            # through and save a fresh note rather than dropping the text.
+
+        entry = {"text": text, "ts": datetime.now().strftime("%Y-%m-%d %H:%M")}
+        if self._current_verse:
+            entry["verse"] = self._current_verse
+        self.notes.setdefault(key, []).append(entry)
         self._write_notes()
         self._refresh_notes()
 
@@ -2558,7 +2569,7 @@ document.addEventListener('click', function (e) {{
             if shift and keyname in ("plus", "equal"):
                 self._grow_note_height()
                 return True
-            if shift and keyname == "minus":
+            if shift and keyname in ("minus", "underscore"):
                 self._shrink_note_height()
                 return True
             if not shift and keyname == "h":
