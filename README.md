@@ -16,6 +16,10 @@ typography and layout while staying true to the Omarchy look.
 - Toggleable header (`Ctrl + Shift + H`)
 - Table of contents (`Ctrl + T`) navigable with arrow keys and Neo-Vim `j`/`k`
 - Paginated reading (page breaks fit the viewport, no scrolling the text)
+- Verse-by-verse navigation in the reader (`j` / `k` highlight each verse and
+  scroll it into view)
+- Notes record the highlighted verse next to the timestamp (`… · v. 5`)
+- Home screen selectable with the keyboard (`j` / `k` + Enter)
 - Keyboard navigation: `←`/`→`, `PageUp`/`PageDown`, `Space`
 - Auto-advance across chapters (including skipping empty pages)
 - Font size controls (`A−` / `A+`) in the header
@@ -29,15 +33,18 @@ typography and layout while staying true to the Omarchy look.
 - `Ctrl + T` — table of contents (arrow keys / `j` / `k` to move, Enter to open)
 - `Ctrl + N` — notes panel (Ctrl+Enter to add a note)
 - `Ctrl + S` — settings
-- `Ctrl + h/j/k/l` — cycle between sections (notes list → add a note → content)
+- `Ctrl + h/j/k/l` — cycle between sections (notes list → add a note → content);
+  `Ctrl + h` jumps straight to the notes list (even while typing a note)
 - `Ctrl + Shift + K` — keybinding reference
 - `Ctrl + Shift + H` — toggle header
 - `Ctrl + [` / `Ctrl + P` — home / translations browser
 - `Ctrl + B` — toggle reader mode
 - `Ctrl + O` — open a book file
+- On the home screen: `j` / `k` select Continue where you left off /
+  Translations, Enter opens
 - `H` / `L` — previous / next page (always left / right)
 - `J` / `K` — with a note highlighted: move up / down the notes; with content
-  focused: scroll up / down
+  focused: step through the verses (highlighting each as it scrolls into view)
 - `x` — delete the highlighted note
 - `Ctrl + Shift + +/-` — grow / shrink the notes panel
 

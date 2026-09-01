@@ -187,6 +187,7 @@ def load_notes():
                     {
                         "text": str(it.get("text", "")),
                         "ts": str(it.get("ts", "")),
+                        "verse": int(it.get("verse") or 0),
                     }
                 )
         data[key] = [n for n in migrated if n["text"].strip()]
@@ -342,6 +343,28 @@ STYLESHEET = """
     transition: opacity 0.15s ease;
   }}
   .page.active {{ opacity: 1; }}
+  sup.v {{
+    color: {accent};
+    font-weight: bold;
+    font-size: 0.72em;
+    margin-right: 0.35em;
+  }}
+  span.v {{
+    color: {accent};
+    font-weight: bold;
+    margin-right: 0.15em;
+  }}
+  .v-highlight {{
+    background: alpha({accent}, 0.55) !important;
+    color: {foreground} !important;
+    border-radius: 3px;
+    padding: 0 2px;
+  }}
+  .verse-glow {{
+    background: alpha({accent}, 0.10) !important;
+    border-left: 3px solid {accent};
+    padding-left: 0.6em;
+  }}
   #container {{
     position: absolute;
     left: 0; right: 0; top: 0; bottom: 0;
@@ -465,11 +488,15 @@ STYLESHEET = """
     opacity: 0.7;
     text-align: center;
   }}
+  .focused {{
+    outline: 2px solid {accent};
+    outline-offset: 2px;
+  }}
 </style>
 """
 
 PAGE_JS = r"""
-var state = { pages: 0, current: 0, ready: false, reported: false };
+var state = { pages: 0, current: 0, ready: false, reported: false, verseIdx: -1 };
 
 function post(msg) {
   if (window.webkit && window.webkit.messageHandlers &&
@@ -571,6 +598,55 @@ function report() {
 
 function currentPageIdx() { return state.current; }
 
+function clearVerseHighlight() {
+  var all = document.querySelectorAll('.verse-glow, .v-highlight');
+  for (var i = 0; i < all.length; i++) {
+    all[i].classList.remove('verse-glow');
+    all[i].classList.remove('v-highlight');
+  }
+  state.verseIdx = -1;
+}
+
+function resetVerseHighlight() {
+  clearVerseHighlight();
+  post({type:'verse', verse: 0});
+}
+
+function verseElems() {
+  var p = document.querySelector('.page.active');
+  if (!p) return [];
+  return Array.prototype.slice.call(p.querySelectorAll('sup.v, span.v'));
+}
+
+function applyVerseHighlight(el, vn) {
+  clearVerseHighlight();
+  if (!el) return;
+  state.verseIdx = Array.prototype.indexOf.call(verseElems(), el);
+  el.classList.add('v-highlight');
+  var par = el.closest('p');
+  if (par) par.classList.add('verse-glow');
+  var page = el.closest('.page');
+  if (page && page.scrollHeight > page.clientHeight) {
+    page.scrollTop = Math.max(0, el.offsetTop - page.clientHeight * 0.35);
+  }
+  if (vn) post({type:'verse', verse: parseInt(vn, 10) || 0});
+}
+
+function moveVerse(delta) {
+  var els = verseElems();
+  if (els.length === 0) {
+    scrollContent(delta > 0 ? 70 : -70);
+    return false;
+  }
+  if (state.verseIdx < 0) state.verseIdx = 0;
+  state.verseIdx += delta;
+  if (state.verseIdx < 0) state.verseIdx = 0;
+  if (state.verseIdx >= els.length) state.verseIdx = els.length - 1;
+  var el = els[state.verseIdx];
+  applyVerseHighlight(el, el.getAttribute('data-vn'));
+  return true;
+}
+
 function showPage(idx) {
   if (!state.ready || state.pages === 0) return 0;
   if (idx < 0) idx = 0;
@@ -581,6 +657,7 @@ function showPage(idx) {
   }
   state.current = idx;
   window.scrollTo(0, 0);
+  resetVerseHighlight();
   post({type:'page', cur: idx, pages: state.pages, pch: currentCharStart(idx)});
   return idx;
 }
@@ -672,6 +749,10 @@ class OmarchyReader(Gtk.Application):
         self._note_card_rows = []
         self._highlight_index = -1
         self._active_section = "content"
+        self._current_verse = 0
+        self._on_home = False
+        self._home_options = []
+        self._home_sel = 0
 
     def do_command_line(self, command_line):
         options = command_line.get_arguments()
@@ -1065,10 +1146,40 @@ class OmarchyReader(Gtk.Application):
         else:
             self._set_section("content")
 
-    def _scroll_content(self, direction):
-        """J scrolls down, K scrolls up within the current page."""
-        delta = 60 if direction == "down" else -60
-        self._run_js(f"scrollContent({delta});")
+    def _home_apply_highlight(self):
+        """Visual feedback for the home-screen j/k selection."""
+        if not self._on_home or not self._home_options:
+            return
+        sel = self._home_options[self._home_sel % len(self._home_options)]
+        target = ".section.continue" if sel == "continue" else ".book-list .book-item"
+        js = (
+            "var els=document.querySelectorAll('.focused');"
+            "for(var i=0;i<els.length;i++)els[i].classList.remove('focused');"
+            f"var t=document.querySelector('{target}');"
+            "if(t)t.classList.add('focused');"
+        )
+        self._run_js(js)
+
+    def _home_move(self, delta):
+        if len(self._home_options) > 1:
+            self._home_sel = (self._home_sel + delta) % len(self._home_options)
+        self._home_apply_highlight()
+
+    def _home_activate(self):
+        if not self._home_options:
+            return
+        sel = self._home_options[self._home_sel % len(self._home_options)]
+        if sel == "continue":
+            self._continue_reading()
+        else:
+            t = list_translations()
+            if t:
+                self.open_book(os.path.join(TRANSLATIONS_DIR, t[0]))
+
+    def _move_verse(self, direction):
+        """J steps down / K steps up through the verses in the current page."""
+        delta = 1 if direction == "down" else -1
+        self._run_js(f"moveVerse({delta});")
 
     def _panel_focus_state(self):
         focused = self._notes_zone == "list" or self._focus_in_text_input()
@@ -1179,6 +1290,7 @@ class OmarchyReader(Gtk.Application):
 
             ntext = note.get("text", note) if isinstance(note, dict) else note
             nts = note.get("ts") if isinstance(note, dict) else ""
+            nverse = note.get("verse", 0) if isinstance(note, dict) else 0
 
             text = Gtk.Label(label=str(ntext))
             text.set_xalign(0.0)
@@ -1186,8 +1298,11 @@ class OmarchyReader(Gtk.Application):
             text.set_halign(Gtk.Align.START)
             row.pack_start(text, False, False, 0)
 
-            if nts:
-                ts = Gtk.Label(label=nts)
+            meta = nts
+            if nverse:
+                meta = f"{meta} \u00b7 v. {nverse}" if meta else f"v. {nverse}"
+            if meta:
+                ts = Gtk.Label(label=meta)
                 ts.get_style_context().add_class("progress-label")
                 ts.set_xalign(0.0)
                 ts.set_halign(Gtk.Align.START)
@@ -1305,9 +1420,10 @@ class OmarchyReader(Gtk.Application):
             return
         from datetime import datetime
 
-        self.notes.setdefault(key, []).append(
-            {"text": text, "ts": datetime.now().strftime("%Y-%m-%d %H:%M")}
-        )
+        entry = {"text": text, "ts": datetime.now().strftime("%Y-%m-%d %H:%M")}
+        if self._current_verse:
+            entry["verse"] = self._current_verse
+        self.notes.setdefault(key, []).append(entry)
         self._write_notes()
         self._refresh_notes()
 
@@ -1482,7 +1598,8 @@ class OmarchyReader(Gtk.Application):
             ("Ctrl + B", "Toggle reader mode"),
             ("Ctrl + O", "Open a book file"),
             ("H / L", "Previous / next page (left / right)"),
-            ("J / K", "Notes highlighted: move up / down · content: scroll"),
+            ("J / K", "Notes highlighted: move up / down · content: verses"),
+            ("Home: j/k", "Select Continue where you left off / Translations, Enter"),
             ("x", "Delete the highlighted note"),
             ("Ctrl + Shift + +/-", "Grow / shrink note panel"),
             ("Ctrl + Right / Ctrl + Left", "Traverse chapters"),
@@ -1825,6 +1942,8 @@ class OmarchyReader(Gtk.Application):
         self._hide_notes()
         self._hide_settings()
         self._hide_help()
+        self._on_home = True
+        self._home_options = []
         state = load_state()
         translations = list_translations()
 
@@ -1832,6 +1951,7 @@ class OmarchyReader(Gtk.Application):
         ans = ""
         last_file = state.get("book")
         if last_file and os.path.exists(os.path.join(TRANSLATIONS_DIR, last_file)):
+            self._home_options.append("continue")
             chap = state.get("chapter", 1)
             page = state.get("page", 1)
             name = _display_name(last_file)
@@ -1847,6 +1967,7 @@ class OmarchyReader(Gtk.Application):
 
         # Translation list.
         if translations:
+            self._home_options.append("translations")
             items = "".join(
                 f'<a class="book-item" href="javascript:void(0)" data-file="{t}">'
                 f'<span class="book-name">{_display_name(t)}</span></a>'
@@ -1854,6 +1975,8 @@ class OmarchyReader(Gtk.Application):
             )
         else:
             items = '<div class="empty">No translations found in the <code>translations/</code> folder. Place .epub files there.</div>'
+
+        self._home_sel = 0
 
         html = f"""<!doctype html><html><head><meta charset="utf-8">
 {self._styles()}
@@ -1882,7 +2005,7 @@ document.addEventListener('click', function (e) {{
     <div class="section-title">Bible Translations</div>
     <div class="book-list">{items}</div>
   </div>
-  <div class="home-footer">Ctrl+Shift+H header · Ctrl+N notes · Ctrl+T contents · Ctrl+[ home · Ctrl+Shift+K keys</div>
+  <div class="home-footer">j/k select · Enter open · Ctrl+[ home · Ctrl+Shift+K keys</div>
 </div>
 </body></html>"""
         self.webview.load_html(html, None)
@@ -1931,6 +2054,7 @@ document.addEventListener('click', function (e) {{
 
     def _open_book_real(self, path):
         try:
+            self._on_home = False
             self.book_path = path
             self.book = epub.read_epub(path)
             self._prepare_chapters()
@@ -2120,6 +2244,30 @@ document.addEventListener('click', function (e) {{
         body = re.sub(r"style\s*=\s*'([^']*)'", neutral_style, body, flags=re.I)
         return body
 
+    def _annotate_verses(self, body):
+        """Tag verse-number markers with data-vn so J/K can step per verse.
+
+        Handles the two verse styles found in bundled translations: KJV/ASV use
+        <sup>N</sup>; ESV uses <span class="bold">N </span>. Only the style
+        that actually appears is used.
+        """
+        body = re.sub(
+            r"<sup>(\d+)</sup>",
+            r'<sup class="v" data-vn="\1">\1</sup>',
+            body,
+            flags=re.I,
+        )
+        if len(re.findall(r'class="v"', body)) < 3:
+            esv = re.findall(r'<span class="bold">(\d+) </span>', body, flags=re.I)
+            if len(esv) >= 3:
+                body = re.sub(
+                    r'<span class="bold">(\d+) </span>',
+                    r'<span class="bold v" data-vn="\1">\1 </span>',
+                    body,
+                    flags=re.I,
+                )
+        return body
+
     # ---------------- Chapter loading ----------------
     def _do_load_chapter(self, index):
         if index < 0 or index >= len(self.chapters):
@@ -2136,7 +2284,7 @@ document.addEventListener('click', function (e) {{
         except UnicodeDecodeError:
             content = raw.decode("latin-1", "replace")
 
-        body_content = self._extract_body(content)
+        body_content = self._annotate_verses(self._extract_body(content))
         base_url = "file://" + os.path.dirname(path) + "/"
 
         html = f"""<!doctype html><html><head><meta charset="utf-8">
@@ -2157,6 +2305,8 @@ document.addEventListener('click', function (e) {{
     def on_load_changed(self, webview, event):
         if event != WebKit2.LoadEvent.FINISHED:
             return
+        if self._on_home:
+            self._home_apply_highlight()
         if self._is_loading:
             self._is_loading = False
 
@@ -2177,6 +2327,7 @@ document.addEventListener('click', function (e) {{
             self._continue_reading()
         elif mtype == "ready":
             self._is_loading = False
+            self._current_verse = 0
             pages = data.get("pages", 0)
             self.loading_box.set_visible(False)
             self._show_spinner(False)
@@ -2208,6 +2359,8 @@ document.addEventListener('click', function (e) {{
             if pages <= 0:
                 # empty chapter - advance to next non-empty automatically
                 self.next_chapter()
+        elif mtype == "verse":
+            self._current_verse = int(data.get("verse") or 0)
         elif mtype == "edge":
             if data.get("dir") == "next":
                 self.next_chapter()
@@ -2351,7 +2504,12 @@ document.addEventListener('click', function (e) {{
             if shift and keyname == "h":
                 self._toggle_header()
                 return True
-            if not shift and keyname in ("h", "j", "k", "l"):
+            if not shift and keyname == "h":
+                # Ctrl+h always jumps to the highlight-able notes list
+                # (works even while typing a note).
+                self._set_section("list")
+                return True
+            if not shift and keyname in ("j", "k", "l"):
                 self._cycle_section()
                 return True
             if self._hotkey_matches(HOTKEYS.get("toc"), keyname, state):
@@ -2400,6 +2558,19 @@ document.addEventListener('click', function (e) {{
                 self._toc_activate_current()
                 return True
 
+        # Home screen: j/k select between "Continue where you left off" and
+        # "Translations"; Enter activates the selection.
+        if self._on_home:
+            if keyname in ("j", "J"):
+                self._home_move(1)
+                return True
+            if keyname in ("k", "K"):
+                self._home_move(-1)
+                return True
+            if keyname in ("Return", "KP_Enter"):
+                self._home_activate()
+                return True
+
         # While typing in the notes editor, let plain keys type — do not let
         # H/L/J/K/x etc. trigger hotkeys (limit hotkeys while typing). Ctrl+
         # combos and Escape were already handled above.
@@ -2430,7 +2601,8 @@ document.addEventListener('click', function (e) {{
             self._run_js("nextPage();")
             return True
 
-        # J down / K up: navigate the highlighted note, or scroll the content.
+        # J down / K up: navigate the highlighted note, or step verse-by-verse
+        # through the content (highlighting each verse as we go).
         if keyname in ("j", "J"):
             if (
                 self._active_section == "notes"
@@ -2439,7 +2611,7 @@ document.addEventListener('click', function (e) {{
             ):
                 self._move_highlight(1)
             else:
-                self._scroll_content("down")
+                self._move_verse(1)
             return True
         if keyname in ("k", "K"):
             if (
@@ -2449,7 +2621,7 @@ document.addEventListener('click', function (e) {{
             ):
                 self._move_highlight(-1)
             else:
-                self._scroll_content("up")
+                self._move_verse(-1)
             return True
 
         # x deletes the highlighted note when a note is highlighted.
