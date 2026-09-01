@@ -27,12 +27,14 @@ typography and layout while staying true to the Omarchy look.
 ## Hotkeys
 
 - `Ctrl + T` — table of contents (arrow keys / `j` / `k` to move, Enter to open)
-- `Ctrl + N` — notes panel
+- `Ctrl + N` — notes panel (Ctrl+Enter to add a note)
 - `Ctrl + S` — settings
+- `Ctrl + K` — keybinding reference
 - `Ctrl + H` — toggle header
-- `Ctrl + P` — home / translations browser
+- `Ctrl + [` / `Ctrl + P` — home / translations browser
 - `Ctrl + B` — toggle reader mode
 - `Ctrl + O` — open a book file
+- `j` / `k` — next / previous page (Vim style)
 
 ## Requirements (Arch / Omarchy)
 

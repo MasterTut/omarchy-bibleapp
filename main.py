@@ -100,7 +100,9 @@ DEFAULT_HOTKEYS = {
     "page_prev": "Ctrl+Left",
     "note": "Ctrl+n",
     "home": "Ctrl+p",
+    "home_bracket": "Ctrl+bracketleft",
     "settings": "Ctrl+s",
+    "help": "Ctrl+k",
 }
 
 HOTKEYS = dict(DEFAULT_HOTKEYS)
@@ -490,20 +492,37 @@ function paginate() {
     return probe.scrollHeight;
   }
 
+  var pieceLens = pieces.map(function (s) {
+    var d = document.createElement('div');
+    d.innerHTML = s;
+    return d.textContent.length;
+  });
+
   var pages = [];
+  var charStarts = [];
   var block = '';
+  var blockLen = 0;
+  var total = 0;
   for (var i = 0; i < pieces.length; i++) {
     var candidate = block + pieces[i];
     if (block && measure(candidate) > pageHeight) {
       pages.push(block);
+      charStarts.push(total);
+      total += blockLen;
       block = pieces[i];
+      blockLen = pieceLens[i];
     } else {
       block = candidate;
+      blockLen += pieceLens[i];
     }
   }
-  if (block) pages.push(block);
+  if (block) {
+    pages.push(block);
+    charStarts.push(total);
+  }
   document.body.removeChild(probe);
 
+  state.charStarts = charStarts;
   state.pages = pages.length;
   container.innerHTML = '';
   for (var p = 0; p < pages.length; p++) {
@@ -518,8 +537,12 @@ function paginate() {
   return pages.length;
 }
 
+function currentCharStart(p) {
+  return (state.charStarts && state.charStarts[p] != null) ? state.charStarts[p] : 0;
+}
+
 function report() {
-  post({type:'ready', pages: state.pages});
+  post({type:'ready', pages: state.pages, pch: currentCharStart(state.current)});
 }
 
 function currentPageIdx() { return state.current; }
@@ -534,6 +557,7 @@ function showPage(idx) {
   }
   state.current = idx;
   window.scrollTo(0, 0);
+  post({type:'page', cur: idx, pages: state.pages, pch: currentCharStart(idx)});
   return idx;
 }
 
@@ -541,9 +565,7 @@ function nextPage() {
   if (!state.ready) return -2;
   if (state.pages === 0) { post({type:'edge', dir:'next'}); return -1; }
   if (state.current + 1 < state.pages) {
-    showPage(state.current + 1);
-    post({type:'page', cur:state.current, pages:state.pages});
-    return state.current;
+    return showPage(state.current + 1);
   }
   post({type:'edge', dir:'next'});
   return -1;
@@ -553,9 +575,7 @@ function prevPage() {
   if (!state.ready) return -2;
   if (state.pages === 0) { post({type:'edge', dir:'prev'}); return -1; }
   if (state.current - 1 >= 0) {
-    showPage(state.current - 1);
-    post({type:'page', cur:state.current, pages:state.pages});
-    return state.current;
+    return showPage(state.current - 1);
   }
   post({type:'edge', dir:'prev'});
   return -1;
@@ -601,6 +621,7 @@ class OmarchyReader(Gtk.Application):
         self.chapters = []
         self.chapter_index = 0
         self.current_page = 0
+        self.current_ch = 0
         self.page_count = 0
         self.font_size = 18
         self.reading_mode = "dark"
@@ -725,6 +746,10 @@ class OmarchyReader(Gtk.Application):
         self._build_settings_overlay()
         self.loading_overlay_win.add_overlay(self._settings_overlay)
 
+        # Keybinding reference overlay (hidden until toggled).
+        self._build_help_overlay()
+        self.loading_overlay_win.add_overlay(self._help_overlay)
+
         self.window = win
         win.add(self.loading_overlay_win)
         win.connect("key-press-event", self.on_key_pressed_raw)
@@ -738,6 +763,7 @@ class OmarchyReader(Gtk.Application):
         self.toc_overlay.set_visible(False)
         self._notes_overlay.set_visible(False)
         self._settings_overlay.set_visible(False)
+        self._help_overlay.set_visible(False)
         # Re-apply header visibility (show_all() blindly re-shows everything).
         if SETTINGS.get("auto_hide_header", True):
             self.headerbar.set_visible(False)
@@ -831,6 +857,7 @@ class OmarchyReader(Gtk.Application):
             return
         self._hide_notes()
         self._hide_settings()
+        self._hide_help()
         self._refresh_toc()
         self.toc_overlay.show_all()
         self.toc_overlay.set_visible(True)
@@ -921,30 +948,31 @@ class OmarchyReader(Gtk.Application):
         body.pack_start(scroller, True, True, 0)
 
         side = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
-        side.set_valign(Gtk.Align.CENTER)
-        side.set_size_request(320, -1)
+        side.set_valign(Gtk.Align.FILL)
+        side.set_size_request(340, -1)
 
-        entry_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-        self.notes_entry = Gtk.Entry()
-        self.notes_entry.set_placeholder_text("Add a note for this page\u2026")
-        self.notes_entry.connect("activate", self._on_note_entry_activated)
-        entry_row.pack_start(self.notes_entry, True, True, 0)
+        self.notes_textview = Gtk.TextView()
+        self.notes_textview.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
+        self.notes_textview.set_vexpand(True)
+        self.notes_textview.connect("key-press-event", self._on_note_textview_key)
+        self.notes_buffer = self.notes_textview.get_buffer()
+        side.pack_start(self.notes_textview, True, True, 0)
 
+        add_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
         add = Gtk.Button(label="Add")
         add.connect("clicked", self._on_note_add)
-        entry_row.pack_start(add, False, False, 0)
-        side.pack_start(entry_row, False, False, 0)
+        add_row.pack_start(add, False, False, 0)
 
-        hint = Gtk.Label(label="Ctrl+N to close")
+        hint = Gtk.Label(label="Ctrl+Enter to add · Ctrl+N to close")
         hint.get_style_context().add_class("progress-label")
-        hint.set_halign(Gtk.Align.START)
-        side.pack_start(hint, False, False, 0)
+        add_row.pack_start(hint, True, True, 0)
+        side.pack_start(add_row, False, False, 0)
 
         body.pack_start(side, False, False, 0)
 
         self._notes_overlay.pack_start(bar, False, False, 0)
         self._notes_overlay.pack_start(body, True, True, 0)
-        self._notes_overlay.set_size_request(-1, 260)
+        self._notes_overlay.set_size_request(-1, 280)
 
     def _load_notes_from_disk(self):
         self.notes = load_notes()
@@ -953,11 +981,23 @@ class OmarchyReader(Gtk.Application):
         save_notes(self.notes)
 
     def _note_key(self):
-        """Location key for the current book/chapter/page."""
+        """Stable location key for the current book/chapter.
+
+        Uses the character offset into the chapter where the current page
+        starts (reported by the paginator), so notes stay anchored to the
+        text rather than to a page number that shifts with window size.
+        """
         if not self.book_path or not self.chapters:
             return None
         book = os.path.basename(self.book_path)
-        return f"{book}|{self.chapter_index}|{self.current_page}"
+        return f"{book}|{self.chapter_index}|{self.current_ch}"
+
+    def _legacy_note_keys(self):
+        """Older notes.json entries anchored by page number instead of char."""
+        if not self.book_path or not self.chapters:
+            return []
+        book = os.path.basename(self.book_path)
+        return [f"{book}|{self.chapter_index}|{self.current_page}"]
 
     def _note_location_label(self):
         book = os.path.basename(self.book_path) if self.book_path else ""
@@ -975,12 +1015,13 @@ class OmarchyReader(Gtk.Application):
             return
         self._hide_toc()
         self._hide_settings()
+        self._hide_help()
         self._refresh_notes()
         self._notes_overlay.show_all()
         self._notes_overlay.set_visible(True)
-        # Focus the entry so typing a note works immediately and pointer/space
-        # keys are not stolen by the reader's page navigator.
-        self.notes_entry.grab_focus()
+        # Focus the editor so typing a note works immediately and plain keys
+        # (space, letters, ...) are not stolen by the reader's page navigator.
+        self.notes_textview.grab_focus()
 
     def _hide_notes(self):
         self._notes_overlay.set_visible(False)
@@ -1003,7 +1044,11 @@ class OmarchyReader(Gtk.Application):
             self.notes_list.pack_start(empty, False, False, 0)
             return
 
-        notes = self.notes.get(key, [])
+        keys = [key] + self._legacy_note_keys()
+        notes = []
+        for k in keys:
+            if k:
+                notes.extend(self.notes.get(k, []))
         if not notes:
             empty = Gtk.Label(label="No notes for this page.")
             empty.get_style_context().add_class("progress-label")
@@ -1029,15 +1074,21 @@ class OmarchyReader(Gtk.Application):
 
         self.notes_list.show_all()
 
-    def _on_note_entry_activated(self, entry):
-        self._add_note()
+    def _on_note_textview_key(self, widget, event):
+        if event.keyval in (Gdk.KEY_Return, Gdk.KEY_KP_Enter) and (
+            event.state & Gdk.ModifierType.CONTROL_MASK
+        ):
+            self._add_note()
+            return True
+        return False
 
     def _on_note_add(self, button):
         self._add_note()
 
     def _add_note(self):
-        text = self.notes_entry.get_text().strip()
-        self.notes_entry.set_text("")
+        start, end = self.notes_buffer.get_bounds()
+        text = self.notes_buffer.get_text(start, end, False).strip()
+        self.notes_buffer.set_text("")
         if not text:
             return
         key = self._note_key()
@@ -1130,12 +1181,83 @@ class OmarchyReader(Gtk.Application):
     def _show_settings(self):
         self._hide_notes()
         self._hide_toc()
+        self._hide_help()
         self._settings_overlay.show_all()
         self._settings_overlay.set_visible(True)
         self._auto_hide_switch.set_active(SETTINGS.get("auto_hide_header", True))
 
     def _hide_settings(self):
         self._settings_overlay.set_visible(False)
+
+    # ---------------- Keybinding reference ----------------
+    def _build_help_overlay(self):
+        """Build the keybinding reference panel (opened with Ctrl+K)."""
+        self._help_overlay = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        self._help_overlay.set_visible(False)
+        self._help_overlay.set_halign(Gtk.Align.CENTER)
+        self._help_overlay.set_valign(Gtk.Align.CENTER)
+        self._help_overlay.get_style_context().add_class("settings-overlay")
+        self._help_overlay.set_size_request(460, -1)
+
+        bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        bar.set_margin_start(16)
+        bar.set_margin_end(16)
+        bar.set_margin_top(14)
+        bar.set_margin_bottom(8)
+
+        title = Gtk.Label(label="Keybindings")
+        title.get_style_context().add_class("title-label")
+        title.set_halign(Gtk.Align.START)
+        bar.pack_start(title, True, True, 0)
+
+        close = Gtk.Button(label="\u2715")
+        close.connect("clicked", lambda *_: self._hide_help())
+        bar.pack_end(close, False, False, 0)
+
+        rows = [
+            ("Ctrl + T", "Table of contents (arrows / j / k, Enter)"),
+            ("Ctrl + N", "Notes panel (Ctrl+Enter to add)"),
+            ("Ctrl + S", "Settings"),
+            ("Ctrl + K", "Keybindings reference"),
+            ("Ctrl + H", "Toggle header bar"),
+            ("Ctrl + [", "Home / choose a translation"),
+            ("Ctrl + P", "Home / choose a translation"),
+            ("Ctrl + B", "Toggle reader mode"),
+            ("Ctrl + O", "Open a book file"),
+            ("Right / Left / Space", "Next / previous page"),
+            ("j / k", "Next / previous page (Vim style)"),
+            ("Ctrl + Right / Ctrl + Left", "Traverse chapters"),
+        ]
+        lines = "\n".join(
+            f"<span weight='bold'>{k}</span>{'&#160;' * 4}{v}" for k, v in rows
+        )
+        body = Gtk.Label()
+        body.set_markup(lines)
+        body.set_xalign(0.0)
+        body.set_halign(Gtk.Align.START)
+        body.set_line_wrap(True)
+        body.set_margin_start(24)
+        body.set_margin_end(24)
+        body.set_margin_bottom(20)
+
+        self._help_overlay.pack_start(bar, False, False, 0)
+        self._help_overlay.pack_start(body, False, False, 0)
+
+    def _toggle_help(self):
+        if self._help_overlay.get_visible():
+            self._hide_help()
+        else:
+            self._show_help()
+
+    def _show_help(self):
+        self._hide_notes()
+        self._hide_toc()
+        self._hide_settings()
+        self._help_overlay.show_all()
+        self._help_overlay.set_visible(True)
+
+    def _hide_help(self):
+        self._help_overlay.set_visible(False)
 
     def _apply_theme_css(self):
         css = f"""
@@ -1214,6 +1336,17 @@ class OmarchyReader(Gtk.Application):
             }}
             .note-card label {{
                 color: {THEME["foreground"]};
+            }}
+            textview {{
+                color: {THEME["foreground"]};
+                background-color: rgba(255,255,255,0.05);
+                border-radius: 8px;
+                border: 1px solid rgba(255,255,255,0.12);
+                padding: 4px 6px;
+            }}
+            textview text {{
+                color: {THEME["foreground"]};
+                background-color: transparent;
             }}
             .settings-overlay {{
                 background-color: alpha({THEME["background"]}, 0.97);
@@ -1407,6 +1540,7 @@ class OmarchyReader(Gtk.Application):
         self.loading_box.set_visible(False)
         self._hide_notes()
         self._hide_settings()
+        self._hide_help()
         state = load_state()
         translations = list_translations()
 
@@ -1464,7 +1598,7 @@ document.addEventListener('click', function (e) {{
     <div class="section-title">Bible Translations</div>
     <div class="book-list">{items}</div>
   </div>
-  <div class="home-footer">Ctrl+H header · Ctrl+N notes · Ctrl+T contents · Ctrl+P home</div>
+  <div class="home-footer">Ctrl+H header · Ctrl+N notes · Ctrl+T contents · Ctrl+[ home · Ctrl+K keys</div>
 </div>
 </body></html>"""
         self.webview.load_html(html, None)
@@ -1504,9 +1638,9 @@ document.addEventListener('click', function (e) {{
         else:
             dialog.destroy()
 
-    def open_book(self, path):
-        self._resume_index = None
-        self._resume_page_num = None
+    def open_book(self, path, resume_index=None, resume_page_num=None):
+        self._resume_index = resume_index
+        self._resume_page_num = resume_page_num
         self.show_loading()
         # Use idle callback so the loading screen renders before we block on epub.read_epub
         GLib.idle_add(self._open_book_real, path)
@@ -1763,6 +1897,7 @@ document.addEventListener('click', function (e) {{
             self.loading_box.set_visible(False)
             self._show_spinner(False)
             self.current_page = 0
+            self.current_ch = data.get("pch", 0)
             self.page_count = pages
             self._show_progress(1)
 
@@ -1791,6 +1926,7 @@ document.addEventListener('click', function (e) {{
         elif mtype == "page":
             self._page_pages = data.get("pages", 0)
             self.current_page = data.get("cur", 0)
+            self.current_ch = data.get("pch", 0)
             self.page_count = data.get("pages", 0)
             self._show_progress(data.get("cur", 0) + 1)
             self._save_state()
@@ -1816,7 +1952,10 @@ document.addEventListener('click', function (e) {{
         if not os.path.isfile(path):
             self.show_welcome()
             return
-        self.open_book(path)
+        # Restore the saved chapter (1-based) and page (1-based) position.
+        chapter = max(0, int(state.get("chapter", 1)) - 1)
+        page = max(0, int(state.get("page", 1)) - 1)
+        self.open_book(path, resume_index=chapter, resume_page_num=page)
         chapter = int(state.get("chapter", 1)) - 1
         page = int(state.get("page", 1)) - 1
         self._resume_index = max(chapter, 0)
@@ -1902,6 +2041,9 @@ document.addEventListener('click', function (e) {{
             if self._settings_overlay.get_visible():
                 self._hide_settings()
                 return True
+            if self._help_overlay.get_visible():
+                self._hide_help()
+                return True
             if self.toc_overlay.get_visible():
                 self._hide_toc()
                 return True
@@ -1922,7 +2064,13 @@ document.addEventListener('click', function (e) {{
         if self._hotkey_matches(HOTKEYS.get("settings"), keyname, state):
             self._toggle_settings()
             return True
+        if self._hotkey_matches(HOTKEYS.get("help"), keyname, state):
+            self._toggle_help()
+            return True
         if self._hotkey_matches(HOTKEYS.get("home"), keyname, state):
+            self.show_welcome()
+            return True
+        if self._hotkey_matches(HOTKEYS.get("home_bracket"), keyname, state):
             self.show_welcome()
             return True
         if self._hotkey_matches(HOTKEYS.get("toggle_header"), keyname, state):
@@ -1966,6 +2114,12 @@ document.addEventListener('click', function (e) {{
             self._run_js("nextPage();")
             return True
         elif keyname == "Page_Up":
+            self._run_js("prevPage();")
+            return True
+        elif self.book_path and keyname == "j":
+            self._run_js("nextPage();")
+            return True
+        elif self.book_path and keyname == "k":
             self._run_js("prevPage();")
             return True
         elif keyname == "o" and (state & Gdk.ModifierType.CONTROL_MASK):
