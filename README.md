@@ -1,6 +1,6 @@
-# Omarchy Reader
+# Omarchy-Bible
 
-A minimal, beautiful EPUB e-reader for Linux, styled after the **Omarchy Ash
+A minimal, beautiful EPUB e-reader/bible for Linux, styled after the **Omarchy Ash
 theme**.
 
 Built with **GTK3 + WebKitGTK (WebKit2 4.1)** and **Python 3**, rendering each
@@ -9,7 +9,10 @@ typography and layout while staying true to the Omarchy look.
 
 ## Features
 
-- Open `.epub` books via file dialog or command line
+- Bible translations browser (replaces recently opened)
+- Continue reading (last viewed book and page)
+- Page-specific notes (saved to JSON)
+- Toggleable header (Ctrl + H)
 - Paginated reading (page breaks fit the viewport, no scrolling the text)
 - Keyboard navigation: `←`/`→`, `PageUp`/`PageDown`, `Space`
 - Auto-advance across chapters (including skipping empty pages)

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Omarchy Reader - a minimal EPUB e-reader styled after the Omarchy Ash theme."""
+"""Omarchy-Bible - a minimal EPUB Bible reader styled after the Omarchy Ash theme."""
 
 import os
 import re
@@ -15,9 +15,19 @@ gi.require_version("Gtk", "3.0")
 gi.require_version("WebKit2", "4.1")
 
 from gi.repository import Gtk, Gio, GLib, Gdk, WebKit2
+import ebooklib
 from ebooklib import epub
 
-APP_ID = "org.omarchy.Reader"
+APP_ID = "org.omarchy.Bible"
+
+# Where this project lives (used to locate bundled translations).
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+TRANSLATIONS_DIR = os.path.join(BASE_DIR, "translations")
+
+# User data dir for state + notes.
+DATA_DIR = os.path.expanduser("~/.config/omarchy-bible")
+STATE_PATH = os.path.join(DATA_DIR, "state.json")
+NOTES_PATH = os.path.join(DATA_DIR, "notes.json")
 
 # Fallback palette (Ash) used when the live omarchy theme cannot be read.
 DEFAULT_THEME = {
@@ -76,8 +86,8 @@ def load_theme():
     return True
 
 
-# ~/.config/omarchy-reader/config.toml  (user-editable hotkeys)
-CONFIG_PATH = os.path.expanduser("~/.config/omarchy-reader/config.toml")
+# ~/.config/omarchy-bible/config.toml  (user-editable hotkeys)
+CONFIG_PATH = os.path.expanduser("~/.config/omarchy-bible/config.toml")
 
 DEFAULT_HOTKEYS = {
     "font_increase": "Ctrl+equal",
@@ -87,6 +97,8 @@ DEFAULT_HOTKEYS = {
     "toggle_reader_mode": "Ctrl+b",
     "page_next": "Ctrl+Right",
     "page_prev": "Ctrl+Left",
+    "note": "Ctrl+n",
+    "home": "Ctrl+p",
 }
 
 HOTKEYS = dict(DEFAULT_HOTKEYS)
@@ -114,6 +126,71 @@ def load_config():
                 merged[key] = value.strip()
     HOTKEYS = merged
     return True
+
+
+# ---------------- State & notes persistence ----------------
+
+def _ensure_data_dir():
+    os.makedirs(DATA_DIR, exist_ok=True)
+
+
+def load_state():
+    """Return the persisted reading state dict (book, chapter, page)."""
+    try:
+        with open(STATE_PATH, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+            if isinstance(data, dict):
+                return data
+    except Exception:
+        pass
+    return {}
+
+
+def save_state(state):
+    _ensure_data_dir()
+    try:
+        with open(STATE_PATH, "w", encoding="utf-8") as fh:
+            json.dump(state, fh, indent=2)
+    except Exception:
+        pass
+
+
+def load_notes():
+    """Return notes dict: {location_key: [note, ...]}."""
+    try:
+        with open(NOTES_PATH, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+            if isinstance(data, dict):
+                return data
+    except Exception:
+        pass
+    return {}
+
+
+def save_notes(notes):
+    _ensure_data_dir()
+    try:
+        with open(NOTES_PATH, "w", encoding="utf-8") as fh:
+            json.dump(notes, fh, indent=2)
+    except Exception:
+        pass
+
+
+def list_translations():
+    """Return a sorted list of EPUB filenames in the translations folder."""
+    if not os.path.isdir(TRANSLATIONS_DIR):
+        return []
+    return sorted(
+        f for f in os.listdir(TRANSLATIONS_DIR)
+        if f.lower().endswith(".epub")
+    )
+
+
+def _display_name(filename):
+    name = os.path.splitext(filename)[0]
+    # "ub-EASV" -> "EASV", "KJV.epub" -> "KJV"
+    name = name.split("-")[-1]
+    return name
 
 
 def current_theme_name():
@@ -220,6 +297,106 @@ STYLESHEET = """
   @keyframes loading-slide {{
     0% {{ transform: translateX(-100%); }}
     100% {{ transform: translateX(400%); }}
+  }}
+
+  /* ---- Home / library screen ---- */
+  body.home-body {{
+    overflow: auto;
+    padding: 0;
+    background: {content_bg} !important;
+  }}
+  .home {{
+    max-width: 760px;
+    margin: 0 auto;
+    padding: 56px {side_padding}px 80px;
+  }}
+  .home-title {{
+    font-size: {home_title_fs}px;
+    color: {accent};
+    font-weight: bold;
+    margin-bottom: 4px;
+  }}
+  .home-sub {{
+    color: {muted};
+    margin-bottom: 28px;
+  }}
+  .section {{
+    margin-bottom: 30px;
+  }}
+  .section-title {{
+    font-size: {section_fs}px;
+    color: {muted};
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    margin-bottom: 12px;
+    border-bottom: 1px solid rgba(255,255,255,0.12);
+    padding-bottom: 6px;
+  }}
+  .book-list {{
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }}
+  .book-item {{
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 14px 16px;
+    border: 1px solid rgba(255,255,255,0.12);
+    border-radius: 8px;
+    color: {foreground};
+    text-decoration: none;
+    background: rgba(255,255,255,0.02);
+    transition: background 0.15s ease, border-color 0.15s ease;
+  }}
+  .book-item:hover {{
+    background: alpha({accent}, 0.12);
+    border-color: {accent};
+  }}
+  .book-name {{
+    font-size: {item_fs}px;
+    font-weight: bold;
+  }}
+  .empty {{
+    color: {muted};
+    padding: 12px 2px;
+  }}
+  .continue {{
+    border: 1px solid rgba(255,255,255,0.12);
+    border-radius: 10px;
+    padding: 14px 16px;
+    background: alpha({accent}, 0.08);
+  }}
+  .continue .section-title {{
+    border-bottom: none;
+    margin-bottom: 6px;
+  }}
+  .continue-item {{
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    color: {foreground};
+    text-decoration: none;
+  }}
+  .cont-book {{
+    font-weight: bold;
+    font-size: {item_fs}px;
+  }}
+  .cont-pos {{
+    color: {muted};
+    font-size: 13px;
+  }}
+  .cont-arrow {{
+    margin-left: auto;
+    color: {accent};
+    font-size: 18px;
+  }}
+  .home-footer {{
+    margin-top: 34px;
+    color: {muted};
+    font-size: 12px;
+    opacity: 0.7;
+    text-align: center;
   }}
 </style>
 """
@@ -382,6 +559,8 @@ class OmarchyReader(Gtk.Application):
         self.book_path = None
         self.chapters = []
         self.chapter_index = 0
+        self.current_page = 0
+        self.page_count = 0
         self.font_size = 18
         self.reading_mode = "dark"
         self.window = None
@@ -390,6 +569,8 @@ class OmarchyReader(Gtk.Application):
         self._theme_monitor = None
         self._parent_monitor = None
         self._monitor_parent_path = None
+        self.notes = {}
+        self._notes_overlay = None
 
     def do_command_line(self, command_line):
         options = command_line.get_arguments()
@@ -409,7 +590,7 @@ class OmarchyReader(Gtk.Application):
 
     def create_window(self):
         win = Gtk.ApplicationWindow(application=self)
-        win.set_title("Omarchy Reader")
+        win.set_title("Omarchy-Bible")
         win.set_default_size(900, 700)
 
         # Enable real window transparency: the reading surface uses a
@@ -446,6 +627,7 @@ class OmarchyReader(Gtk.Application):
 
         self.headerbar = hb
         win.set_titlebar(hb)
+        self.headerbar.set_visible(False)
 
         settings = WebKit2.Settings()
         settings.set_enable_javascript(True)
@@ -491,9 +673,14 @@ class OmarchyReader(Gtk.Application):
         self._build_toc_overlay()
         self.loading_overlay_win.add_overlay(self.toc_overlay)
 
+        # Notes overlay (hidden until toggled).
+        self._build_notes_overlay()
+        self.loading_overlay_win.add_overlay(self._notes_overlay)
+
         self.window = win
         win.add(self.loading_overlay_win)
         win.connect("key-press-event", self.on_key_pressed_raw)
+        self._load_notes_from_disk()
 
         self.show_welcome()
         self.window.show_all()
@@ -501,6 +688,7 @@ class OmarchyReader(Gtk.Application):
         # visibility on the whole tree.
         self.loading_box.set_visible(False)
         self.toc_overlay.set_visible(False)
+        self._notes_overlay.set_visible(False)
 
     def _build_toc_overlay(self):
         """Build the chapter-list overlay ("Table of Contents")."""
@@ -602,6 +790,170 @@ class OmarchyReader(Gtk.Application):
         if 0 <= index < len(self.chapters) and index != self.chapter_index:
             self._do_load_chapter(index)
 
+    # ---------------- Notes ----------------
+    def _build_notes_overlay(self):
+        """Build the page-specific notes panel."""
+        self._notes_overlay = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        self._notes_overlay.set_visible(False)
+        self._notes_overlay.set_halign(Gtk.Align.END)
+        self._notes_overlay.set_valign(Gtk.Align.FILL)
+        self._notes_overlay.get_style_context().add_class("notes-overlay")
+
+        bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        bar.set_margin_start(16)
+        bar.set_margin_end(16)
+        bar.set_margin_top(12)
+        bar.set_margin_bottom(8)
+
+        self.notes_title = Gtk.Label(label="Notes")
+        self.notes_title.get_style_context().add_class("title-label")
+        self.notes_title.set_halign(Gtk.Align.START)
+        bar.pack_start(self.notes_title, True, True, 0)
+
+        close = Gtk.Button(label="\u2715")
+        close.connect("clicked", lambda *_: self._hide_notes())
+        bar.pack_end(close, False, False, 0)
+
+        self.notes_loc = Gtk.Label(label="")
+        self.notes_loc.get_style_context().add_class("progress-label")
+        bar.pack_end(self.notes_loc, False, False, 0)
+
+        self.notes_list = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        self.notes_list.set_margin_start(16)
+        self.notes_list.set_margin_end(16)
+        self.notes_list.set_margin_bottom(8)
+
+        scroller = Gtk.ScrolledWindow()
+        scroller.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
+        scroller.set_vexpand(True)
+        scroller.set_max_content_height(420)
+        scroller.set_min_content_width(360)
+        scroller.add(self.notes_list)
+
+        entry_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        entry_row.set_margin_start(16)
+        entry_row.set_margin_end(16)
+        entry_row.set_margin_top(8)
+        entry_row.set_margin_bottom(16)
+
+        self.notes_entry = Gtk.Entry()
+        self.notes_entry.set_placeholder_text("Add a note for this page\u2026")
+        self.notes_entry.connect("activate", self._on_note_entry_activated)
+        entry_row.pack_start(self.notes_entry, True, True, 0)
+
+        add = Gtk.Button(label="Add")
+        add.connect("clicked", self._on_note_add)
+        entry_row.pack_start(add, False, False, 0)
+
+        self._notes_overlay.pack_start(bar, False, False, 0)
+        self._notes_overlay.pack_start(scroller, True, True, 0)
+        self._notes_overlay.pack_start(entry_row, False, False, 0)
+
+    def _load_notes_from_disk(self):
+        self.notes = load_notes()
+
+    def _write_notes(self):
+        save_notes(self.notes)
+
+    def _note_key(self):
+        """Location key for the current book/chapter/page."""
+        if not self.book_path or not self.chapters:
+            return None
+        book = os.path.basename(self.book_path)
+        return f"{book}|{self.chapter_index}|{self.current_page}"
+
+    def _note_location_label(self):
+        book = os.path.basename(self.book_path) if self.book_path else ""
+        name = _display_name(book) if book else ""
+        return f"{name} · ch {self.chapter_index + 1} · page {self.current_page + 1}"
+
+    def _toggle_notes(self):
+        if self._notes_overlay.get_visible():
+            self._hide_notes()
+        else:
+            self._show_notes()
+
+    def _show_notes(self):
+        if not self.book_path or not self.chapters:
+            return
+        self._refresh_notes()
+        self._notes_overlay.show_all()
+        self._notes_overlay.set_visible(True)
+
+    def _hide_notes(self):
+        self._notes_overlay.set_visible(False)
+
+    def _refresh_notes(self):
+        """Rebuild the notes list for the current page."""
+        if not hasattr(self, "notes_list") or self._notes_overlay is None:
+            return
+        if not self._notes_overlay.get_visible():
+            return
+        key = self._note_key()
+        self.notes_loc.set_text(self._note_location_label())
+        for child in self.notes_list.get_children():
+            self.notes_list.remove(child)
+
+        if key is None:
+            empty = Gtk.Label(label="No page selected.")
+            empty.get_style_context().add_class("progress-label")
+            self.notes_list.pack_start(empty, False, False, 0)
+            return
+
+        notes = self.notes.get(key, [])
+        if not notes:
+            empty = Gtk.Label(label="No notes for this page.")
+            empty.get_style_context().add_class("progress-label")
+            self.notes_list.pack_start(empty, False, False, 0)
+            return
+
+        for idx, note in enumerate(notes):
+            row = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+            row.get_style_context().add_class("note-card")
+
+            text = Gtk.Label(label=note)
+            text.set_xalign(0.0)
+            text.set_line_wrap(True)
+            text.set_halign(Gtk.Align.START)
+            row.pack_start(text, False, False, 0)
+
+            del_btn = Gtk.Button(label="Delete")
+            del_btn.set_halign(Gtk.Align.END)
+            del_btn.connect("clicked", lambda *_, k=key, i=idx: self._delete_note(k, i))
+            row.pack_end(del_btn, False, False, 0)
+
+            self.notes_list.pack_start(row, False, False, 0)
+
+        self.notes_list.show_all()
+
+    def _on_note_entry_activated(self, entry):
+        self._add_note()
+
+    def _on_note_add(self, button):
+        self._add_note()
+
+    def _add_note(self):
+        text = self.notes_entry.get_text().strip()
+        self.notes_entry.set_text("")
+        if not text:
+            return
+        key = self._note_key()
+        if key is None:
+            return
+        self.notes.setdefault(key, []).append(text)
+        self._write_notes()
+        self._refresh_notes()
+
+    def _delete_note(self, key, index):
+        notes = self.notes.get(key)
+        if not notes or index >= len(notes):
+            return
+        del notes[index]
+        if not notes:
+            self.notes.pop(key, None)
+        self._write_notes()
+        self._refresh_notes()
+
     def _apply_theme_css(self):
         css = f"""
             window {{
@@ -656,6 +1008,24 @@ class OmarchyReader(Gtk.Application):
             }}
             .toc-overlay row:hover {{
                 background: alpha({THEME["accent"]}, 0.12);
+            }}
+            .notes-overlay {{
+                background-color: alpha({THEME["background"]}, 0.96);
+                border-left: 1px solid rgba(255,255,255,0.12);
+            }}
+            .note-card {{
+                border: 1px solid rgba(255,255,255,0.12);
+                border-radius: 8px;
+                padding: 10px 12px;
+                background: alpha({THEME["accent"]}, 0.08);
+            }}
+            .note-card label {{
+                color: {THEME["foreground"]};
+            }}
+            entry {{
+                color: {THEME["foreground"]};
+                background-color: rgba(255,255,255,0.05);
+                border-radius: 6px;
             }}
             """
         provider = Gtk.CssProvider()
@@ -786,7 +1156,7 @@ class OmarchyReader(Gtk.Application):
         return False
 
     def _title_label(self):
-        self.title_label = Gtk.Label(label="Omarchy Reader")
+        self.title_label = Gtk.Label(label="Omarchy-Bible")
         self.title_label.get_style_context().add_class("title-label")
         return self.title_label
 
@@ -822,6 +1192,9 @@ class OmarchyReader(Gtk.Application):
             selection_foreground=THEME["selection_foreground"],
             font_family=FONT_FAMILY,
             font_size=self.font_size,
+            home_title_fs=self.font_size * 1.8,
+            section_fs=self.font_size + 2,
+            item_fs=self.font_size + 1,
             top_padding=top_padding,
             side_padding=side_padding,
             bottom_padding=bottom_padding,
@@ -831,13 +1204,65 @@ class OmarchyReader(Gtk.Application):
         self._is_loading = False
         self._show_spinner(False)
         self.loading_box.set_visible(False)
+        self._hide_notes()
+        state = load_state()
+        translations = list_translations()
+
+        # Continue-reading row (only if a book/page was previously saved).
+        ans = ""
+        last_file = state.get("book")
+        if last_file and os.path.exists(os.path.join(TRANSLATIONS_DIR, last_file)):
+            chap = state.get("chapter", 1)
+            page = state.get("page", 1)
+            name = _display_name(last_file)
+            ans = f"""
+            <div class="section continue">
+              <div class="section-title">Continue where you left off</div>
+              <a class="continue-item" href="javascript:void(0)" data-action="continue">
+                <span class="cont-book">{name}</span>
+                <span class="cont-pos">Chapter {chap} · Page {page}</span>
+                <span class="cont-arrow">&#10148;</span>
+              </a>
+            </div>"""
+
+        # Translation list.
+        if translations:
+            items = "".join(
+                f'<a class="book-item" href="javascript:void(0)" data-file="{t}">'
+                f'<span class="book-name">{_display_name(t)}</span></a>'
+                for t in translations
+            )
+        else:
+            items = '<div class="empty">No translations found in the <code>translations/</code> folder. Place .epub files there.</div>'
+
         html = f"""<!doctype html><html><head><meta charset="utf-8">
 {self._styles()}
-</head><body>
-<div style="display:flex;flex-direction:column;align-items:center;justify-content:center;height:100%;text-align:center;color:{THEME['muted']};">
-    <div style="font-size:{self.font_size*1.6}px;margin-bottom:0.5em;color:{THEME['accent']};">Omarchy Reader</div>
-    <div style="opacity:0.8;">Open an EPUB to begin reading.</div>
-    <div style="margin-top:1.5em;font-size:{self.font_size}px;">Use <b>Open Book</b> in the header, or Ctrl+O.</div>
+<script>
+function post(msg) {{
+  if (window.webkit && window.webkit.messageHandlers &&
+      window.webkit.messageHandlers.omarchy) {{
+    try {{ window.webkit.messageHandlers.omarchy.postMessage(JSON.stringify(msg)); }}
+    catch (e) {{}}
+  }}
+}}
+document.addEventListener('click', function (e) {{
+  var t = e.target.closest('[data-action]') || e.target.closest('[data-file]');
+  if (!t) return;
+  e.preventDefault();
+  if (t.getAttribute('data-action') === 'continue') post({{type:'continue_reading'}});
+  else post({{type:'open_book', file: t.getAttribute('data-file')}});
+}});
+</script>
+</head><body class="home-body">
+<div class="home">
+  <div class="home-title">Omarchy&#8209;Bible</div>
+  <div class="home-sub">Choose a Bible translation to begin.</div>
+  {ans}
+  <div class="section">
+    <div class="section-title">Bible Translations</div>
+    <div class="book-list">{items}</div>
+  </div>
+  <div class="home-footer">Ctrl+H header · Ctrl+N notes · Ctrl+T contents · Ctrl+P home</div>
 </div>
 </body></html>"""
         self.webview.load_html(html, None)
@@ -878,6 +1303,8 @@ class OmarchyReader(Gtk.Application):
             dialog.destroy()
 
     def open_book(self, path):
+        self._resume_index = None
+        self._resume_page_num = None
         self.show_loading()
         # Use idle callback so the loading screen renders before we block on epub.read_epub
         GLib.idle_add(self._open_book_real, path)
@@ -890,8 +1317,11 @@ class OmarchyReader(Gtk.Application):
             if not self.chapters:
                 self.show_welcome()
                 return False
-            self.chapter_index = 0
-            GLib.idle_add(self._do_load_chapter, 0)
+            start = 0
+            if getattr(self, "_resume_index", None) is not None:
+                start = min(self._resume_index, len(self.chapters) - 1)
+            self.chapter_index = start
+            GLib.idle_add(self._do_load_chapter, start)
         except Exception as e:
             self.show_welcome()
             self.progress_label.set_text(f"Error: {e}")
@@ -900,7 +1330,7 @@ class OmarchyReader(Gtk.Application):
     def _prepare_chapters(self):
         if self.bookdir:
             shutil.rmtree(self.bookdir, ignore_errors=True)
-        self.bookdir = tempfile.mkdtemp(prefix="omarchy-reader-")
+        self.bookdir = tempfile.mkdtemp(prefix="omarchy-bible-")
 
         self._item_paths = {}
         for item in self.book.get_items():
@@ -921,6 +1351,13 @@ class OmarchyReader(Gtk.Application):
         # chapter list (e.g. "Genesis", "Exodus", ...) rather than every spine
         # item, which for many books is hundreds of raw fragments.
         entries = self._flatten_toc()
+
+        # Many free Bibles (e.g. these eReaderBibles EPUBs) expose their TOC
+        # only through the NCX, which ebooklib does not populate into .toc.
+        # Parse the NCX directly in that case.
+        if not entries:
+            entries = self._parse_ncx()
+
         self.chapters = []
         for title, href in entries:
             name = self._resolve_href(href)
@@ -938,7 +1375,7 @@ class OmarchyReader(Gtk.Application):
                 path = self._item_paths.get(name)
                 if not path:
                     continue
-                title = item.get_title() or os.path.basename(name)
+                title = getattr(item, "title", None) or os.path.basename(name)
                 self.chapters.append(("", title, path, name))
 
     def _flatten_toc(self):
@@ -988,6 +1425,54 @@ class OmarchyReader(Gtk.Application):
             if name.lstrip("./") == stripped:
                 return name
         return ""
+
+    def _parse_ncx(self):
+        """Parse the book's NCX to extract (title, href) chapter entries.
+
+        Many free Bibles (including the eReaderBibles EPUBs) keep their full
+        table of contents in the NCX file, which ebooklib does not translate
+        into `book.toc`. Here we walk the navMap and return the leaf navPoints
+        (those without nested children), skipping the parent book-name
+        containers so we end up with entries like "Genesis 1", "Genesis 2", ...
+        """
+        import xml.etree.ElementTree as ET
+
+        entries = []
+        ncx = None
+        for item in self.book.get_items():
+            if item.get_name().lower().endswith(("toc.ncx", ".ncx")):
+                ncx = item
+                break
+        if ncx is None:
+            return entries
+
+        try:
+            raw = (ncx.get_content() or b"").decode("utf-8", "replace")
+            root = ET.fromstring(raw)
+        except Exception:
+            return entries
+
+        ns = ""
+        if root.tag.startswith("{"):
+            ns = root.tag.split("}")[0] + "}"
+
+        def walk(navpoint):
+            label = navpoint.find(f"{ns}navLabel/{ns}text")
+            content = navpoint.find(f"{ns}content")
+            children = navpoint.findall(f"{ns}navPoint")
+            title = (label.text or "").strip() if label is not None else ""
+            src = content.get("src", "") if content is not None else ""
+            if not children and title and src:
+                entries.append((title, src))
+            for child in children:
+                walk(child)
+
+        navmap = root.find(f"{ns}navMap")
+        if navmap is not None:
+            for navpoint in navmap.findall(f"{ns}navPoint"):
+                walk(navpoint)
+
+        return entries
 
     def _extract_body(self, content):
         m = re.search(r"<body[^>]*>(.*?)</body>", content, re.S | re.I | re.DOTALL)
@@ -1064,12 +1549,33 @@ class OmarchyReader(Gtk.Application):
             return
 
         mtype = data.get("type")
-        if mtype == "ready":
+        if mtype == "open_book":
+            file = data.get("file")
+            if file:
+                self.open_book(os.path.join(TRANSLATIONS_DIR, file))
+        elif mtype == "continue_reading":
+            self._continue_reading()
+        elif mtype == "ready":
             self._is_loading = False
             pages = data.get("pages", 0)
             self.loading_box.set_visible(False)
             self._show_spinner(False)
+            self.current_page = 0
+            self.page_count = pages
             self._show_progress(1)
+
+            # If resuming into this chapter, jump to the saved page.
+            if getattr(self, "_resume_index", None) == self.chapter_index:
+                resume_page = getattr(self, "_resume_page_num", None)
+                self._resume_index = None
+                self._resume_page_num = None
+                if resume_page and resume_page > 0:
+                    GLib.idle_add(self._run_js, f"showPage({resume_page});")
+                    self.current_page = resume_page
+                    self._show_progress(resume_page + 1)
+                    self._save_state()
+
+            self._save_state()
             if hasattr(self, "_page_pages"):
                 del self._page_pages
             if pages <= 0:
@@ -1082,7 +1588,37 @@ class OmarchyReader(Gtk.Application):
                 self.prev_chapter()
         elif mtype == "page":
             self._page_pages = data.get("pages", 0)
+            self.current_page = data.get("cur", 0)
+            self.page_count = data.get("pages", 0)
             self._show_progress(data.get("cur", 0) + 1)
+            self._save_state()
+            self._refresh_notes()
+
+    def _save_state(self):
+        if not self.book_path:
+            return
+        filename = os.path.basename(self.book_path)
+        save_state({
+            "book": filename,
+            "chapter": self.chapter_index + 1,
+            "page": self.current_page + 1,
+        })
+
+    def _continue_reading(self):
+        state = load_state()
+        file = state.get("book")
+        if not file:
+            self.show_welcome()
+            return
+        path = os.path.join(TRANSLATIONS_DIR, file)
+        if not os.path.isfile(path):
+            self.show_welcome()
+            return
+        self.open_book(path)
+        chapter = int(state.get("chapter", 1)) - 1
+        page = int(state.get("page", 1)) - 1
+        self._resume_index = max(chapter, 0)
+        self._resume_page_num = max(page, 0)
 
     def _show_spinner(self, visible):
         if self.loading_spinner:
@@ -1143,6 +1679,9 @@ class OmarchyReader(Gtk.Application):
         state = event.state
 
         if keyname == "Escape":
+            if self._notes_overlay.get_visible():
+                self._hide_notes()
+                return True
             if self.toc_overlay.get_visible():
                 self._hide_toc()
                 return True
@@ -1150,6 +1689,12 @@ class OmarchyReader(Gtk.Application):
 
         if self._hotkey_matches(HOTKEYS.get("toc"), keyname, state):
             self._toggle_toc()
+            return True
+        if self._hotkey_matches(HOTKEYS.get("note"), keyname, state):
+            self._toggle_notes()
+            return True
+        if self._hotkey_matches(HOTKEYS.get("home"), keyname, state):
+            self.show_welcome()
             return True
         if self._hotkey_matches(HOTKEYS.get("toggle_header"), keyname, state):
             self._toggle_header()
@@ -1258,5 +1803,5 @@ if __name__ == "__main__":
     try:
         main()
     except Exception as e:
-        print(f"Omarchy Reader failed to start:\n{e}", file=sys.stderr)
+        print(f"Omarchy-Bible failed to start:\n{e}", file=sys.stderr)
         sys.exit(1)

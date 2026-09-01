@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Omarchy-Bible
+GenericName=Bible Reader
+Comment=Read EPUB Bibles, styled after your Omarchy theme
+Exec=/home/monk/Work/omarchy-bibleap/run.sh %F
+Icon=org.omarchy.Bible
+Terminal=false
+Categories=Office;Viewer;Literature;
+Keywords=bible;epub;reader;scripture;
+StartupNotify=true
+StartupWMClass=omarchy-bible
