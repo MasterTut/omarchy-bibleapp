@@ -639,8 +639,8 @@ function moveVerse(delta) {
     return false;
   }
   if (state.verseIdx < 0) {
-    // First press: land on the first verse (or the last when going up).
-    state.verseIdx = delta > 0 ? 0 : els.length - 1;
+    // First press always lands on the first verse; j then walks down, k walks up.
+    state.verseIdx = 0;
   } else {
     state.verseIdx += delta;
     if (state.verseIdx < 0) state.verseIdx = 0;
@@ -650,6 +650,19 @@ function moveVerse(delta) {
   applyVerseHighlight(el, el.getAttribute('data-vn'));
   return true;
 }
+
+// Also handle reader navigation in the page itself so j/k/l/h keep working
+// even when the GTK signal misses the event.
+document.addEventListener('keydown', function (e) {
+  var tag = e.target.tagName.toLowerCase();
+  if (tag === 'input' || tag === 'textarea' || tag === 'select') return;
+  if (e.ctrlKey || e.altKey || e.metaKey) return;
+  var key = e.key.toLowerCase();
+  if (key === 'j') { e.preventDefault(); moveVerse(1); return; }
+  if (key === 'k') { e.preventDefault(); moveVerse(-1); return; }
+  if (key === 'h') { e.preventDefault(); prevPage(); return; }
+  if (key === 'l') { e.preventDefault(); nextPage(); return; }
+});
 
 function showPage(idx) {
   if (!state.ready || state.pages === 0) return 0;
@@ -1130,6 +1143,18 @@ class OmarchyReader(Gtk.Application):
     def _shrink_note_height(self, amount=40):
         self._apply_note_height(max(160, self._note_panel_height - amount))
 
+    def _notes_lose_focus_appearance(self):
+        """Make the notes panel look unfocused without hiding it."""
+        self._notes_zone = "editor"
+        overlay = self._notes_overlay.get_style_context()
+        overlay.remove_class("panel-focused")
+        overlay.remove_class("editor-active")
+        overlay.remove_class("list-active")
+        scroller = self.notes_scroller.get_style_context()
+        scroller.remove_class("zone-active")
+        editor = self.notes_editor_box.get_style_context()
+        editor.remove_class("zone-active")
+
     def _set_section(self, section):
         """Set the active section: \"list\", \"editor\", or \"content\".
 
@@ -1153,11 +1178,12 @@ class OmarchyReader(Gtk.Application):
         elif section == "content":
             self._editing_note = None
             self._active_section = "content"
-            self._set_notes_zone("editor")
+            self._notes_lose_focus_appearance()
             if self.webview:
                 self.webview.grab_focus()
             else:
                 self.window.grab_focus()
+            self._panel_focus_state()
 
     def _cycle_section(self):
         """Cycle to the next section: notes list -> add a note -> content."""
@@ -1377,6 +1403,8 @@ class OmarchyReader(Gtk.Application):
                 self.notes_textview.grab_focus()
                 self._notes_zone = "editor"
                 self._set_notes_zone("editor")
+                return
+        self._panel_focus_state()
 
     def _apply_highlight(self):
         """Visually highlight the currently selected note card."""
@@ -1680,7 +1708,7 @@ class OmarchyReader(Gtk.Application):
             ("Ctrl + B", "Toggle reader mode"),
             ("Ctrl + O", "Open a book file"),
             ("H / L", "Previous / next page (left / right)"),
-            ("J / K", "Notes highlighted: move up / down · content: verses"),
+            ("J / K", "Notes highlighted: move up / down · content: step verses (j down, k up)"),
             ("Home: j/k", "Select Continue where you left off / Translations, Enter"),
             ("x", "Delete the highlighted note"),
             ("Ctrl + Shift + +/-", "Grow / shrink note panel"),
@@ -2567,8 +2595,12 @@ document.addEventListener('click', function (e) {{
         keyname = Gdk.keyval_name(event.keyval)
         kn = keyname.lower() if keyname else ""
         state = event.state
+        ctrl = bool(state & Gdk.ModifierType.CONTROL_MASK)
+        shift = bool(state & Gdk.ModifierType.SHIFT_MASK)
 
-        if keyname == "Escape":
+        # All keybinding checks use the lower-cased keyname so Shift/CapsLock
+        # do not break hotkeys (e.g. Ctrl+L arriving as keyval "L").
+        if kn == "escape":
             if self._notes_overlay.get_visible():
                 self._hide_notes()
                 return True
@@ -2586,8 +2618,6 @@ document.addEventListener('click', function (e) {{
         # Ctrl+Shift combos and section cycling. Ctrl+h/j/k/l cycle between the
         # three sections (notes list -> add a note -> content); handled while
         # typing too.
-        ctrl = bool(state & Gdk.ModifierType.CONTROL_MASK)
-        shift = bool(state & Gdk.ModifierType.SHIFT_MASK)
         if ctrl:
             if shift and kn == "k":
                 self._toggle_help()
@@ -2649,19 +2679,19 @@ document.addEventListener('click', function (e) {{
             if self._hotkey_matches(HOTKEYS.get("page_prev"), keyname, state):
                 self._run_js("prevPage();")
                 return True
-            if keyname == "o":
+            if kn == "o":
                 self.on_open()
                 return True
 
         # Table of contents: arrow keys + Neo-Vim J/k navigation.
         if self.toc_overlay.get_visible():
-            if keyname == "Down" or kn == "j":
+            if kn == "down" or kn == "j":
                 self._toc_move(1)
                 return True
-            if keyname == "Up" or kn == "k":
+            if kn == "up" or kn == "k":
                 self._toc_move(-1)
                 return True
-            if keyname == "Return" or keyname == "KP_Enter":
+            if kn in ("return", "kp_enter"):
                 self._toc_activate_current()
                 return True
 
@@ -2674,7 +2704,7 @@ document.addEventListener('click', function (e) {{
             if kn == "k":
                 self._home_move(-1)
                 return True
-            if keyname in ("Return", "KP_Enter"):
+            if kn in ("return", "kp_enter"):
                 self._home_activate()
                 return True
 
@@ -2724,16 +2754,16 @@ document.addEventListener('click', function (e) {{
                 self._delete_highlighted()
                 return True
 
-        if keyname == "Right":
+        if kn == "right":
             self._run_js("nextPage();")
             return True
-        elif keyname == "Left":
+        elif kn == "left":
             self._run_js("prevPage();")
             return True
-        elif keyname == "Page_Down" or keyname == "space":
+        elif kn == "page_down" or kn == "space":
             self._run_js("nextPage();")
             return True
-        elif keyname == "Page_Up":
+        elif kn == "page_up":
             self._run_js("prevPage();")
             return True
         return False
