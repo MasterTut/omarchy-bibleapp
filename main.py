@@ -1082,6 +1082,14 @@ class OmarchyReader(Gtk.Application):
         side.set_size_request(340, -1)
 
         self.notes_editor_box = side
+
+        # Verse reference label (shows the verse that will be saved with the
+        # note, or "General notes" when no verse is highlighted).
+        self.notes_verse_label = Gtk.Label(label="General notes")
+        self.notes_verse_label.get_style_context().add_class("progress-label")
+        self.notes_verse_label.set_xalign(0.0)
+        side.pack_start(self.notes_verse_label, False, False, 0)
+
         self.notes_textview = Gtk.TextView()
         self.notes_textview.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
         self.notes_textview.set_vexpand(True)
@@ -1090,11 +1098,14 @@ class OmarchyReader(Gtk.Application):
         side.pack_start(self.notes_textview, True, True, 0)
 
         add_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        new = Gtk.Button(label="New")
+        new.connect("clicked", self._on_note_new)
+        add_row.pack_start(new, False, False, 0)
         add = Gtk.Button(label="Add")
         add.connect("clicked", self._on_note_add)
         add_row.pack_start(add, False, False, 0)
 
-        hint = Gtk.Label(label="Ctrl+Enter to add · Ctrl+N to close")
+        hint = Gtk.Label(label="Ctrl+Enter to save \u00b7 Ctrl+N to close")
         hint.get_style_context().add_class("progress-label")
         add_row.pack_start(hint, True, True, 0)
         side.pack_start(add_row, False, False, 0)
@@ -1246,6 +1257,7 @@ class OmarchyReader(Gtk.Application):
         self._notes_overlay.set_visible(True)
         self._refresh_notes()
         self._notes_overlay.show_all()
+        self._update_verse_label()
         # Focus the editor so typing a note works immediately and plain keys
         # (space, letters, ...) are not stolen by the reader's page navigator.
         self._set_notes_zone("editor")
@@ -1312,6 +1324,8 @@ class OmarchyReader(Gtk.Application):
             meta = nts
             if nverse:
                 meta = f"{meta} \u00b7 v. {nverse}" if meta else f"v. {nverse}"
+            else:
+                meta = f"{meta} \u00b7 General notes" if meta else "General notes"
             if meta:
                 ts = Gtk.Label(label=meta)
                 ts.get_style_context().add_class("progress-label")
@@ -1447,6 +1461,17 @@ class OmarchyReader(Gtk.Application):
     def _on_note_add(self, button):
         self._add_note()
 
+    def _on_note_new(self, button):
+        self._editing_note = None
+        self.notes_buffer.set_text("")
+        self.notes_textview.grab_focus()
+
+    def _update_verse_label(self):
+        if self._current_verse:
+            self.notes_verse_label.set_text(f"Verse {self._current_verse}")
+        else:
+            self.notes_verse_label.set_text("General notes")
+
     def _add_note(self):
         start, end = self.notes_buffer.get_bounds()
         text = self.notes_buffer.get_text(start, end, False).strip()
@@ -1466,17 +1491,18 @@ class OmarchyReader(Gtk.Application):
             idx = edit.get("idx")
             if lst and 0 <= idx < len(lst):
                 lst[idx]["text"] = text
-                if self._current_verse:
-                    lst[idx]["verse"] = self._current_verse
+                lst[idx]["verse"] = self._current_verse or 0
                 self._write_notes()
                 self._refresh_notes()
                 return
             # The original note is gone (deleted/navigated away): fall
             # through and save a fresh note rather than dropping the text.
 
-        entry = {"text": text, "ts": datetime.now().strftime("%Y-%m-%d %H:%M")}
-        if self._current_verse:
-            entry["verse"] = self._current_verse
+        entry = {
+            "text": text,
+            "ts": datetime.now().strftime("%Y-%m-%d %H:%M"),
+            "verse": self._current_verse or 0,
+        }
         self.notes.setdefault(key, []).append(entry)
         self._write_notes()
         self._refresh_notes()
@@ -1643,10 +1669,10 @@ class OmarchyReader(Gtk.Application):
 
         rows = [
             ("Ctrl + T", "Table of contents (arrows / j / k, Enter)"),
-            ("Ctrl + N", "Notes panel (Ctrl+Enter to add)"),
+            ("Ctrl + N", "Notes panel (New button / Ctrl+Enter to add)"),
             ("Ctrl + h", "Jump to notes list (works while typing)"),
             ("Ctrl + l", "Add a note / edit the highlighted note"),
-            ("Ctrl + j / k", "Notes list: move highlight · elsewhere: cycle"),
+            ("Ctrl + j / k", "Notes list: move highlight · elsewhere: cycle sections"),
             ("Ctrl + Shift + H", "Toggle header bar"),
             ("Ctrl + S", "Settings"),
             ("Ctrl + Shift + K", "Keybindings reference"),
@@ -2384,6 +2410,7 @@ document.addEventListener('click', function (e) {{
         elif mtype == "ready":
             self._is_loading = False
             self._current_verse = 0
+            self._update_verse_label()
             pages = data.get("pages", 0)
             self.loading_box.set_visible(False)
             self._show_spinner(False)
@@ -2417,6 +2444,7 @@ document.addEventListener('click', function (e) {{
                 self.next_chapter()
         elif mtype == "verse":
             self._current_verse = int(data.get("verse") or 0)
+            self._update_verse_label()
         elif mtype == "edge":
             if data.get("dir") == "next":
                 self.next_chapter()
@@ -2537,6 +2565,7 @@ document.addEventListener('click', function (e) {{
 
     def on_key_pressed_raw(self, widget, event):
         keyname = Gdk.keyval_name(event.keyval)
+        kn = keyname.lower() if keyname else ""
         state = event.state
 
         if keyname == "Escape":
@@ -2560,10 +2589,10 @@ document.addEventListener('click', function (e) {{
         ctrl = bool(state & Gdk.ModifierType.CONTROL_MASK)
         shift = bool(state & Gdk.ModifierType.SHIFT_MASK)
         if ctrl:
-            if shift and keyname == "k":
+            if shift and kn == "k":
                 self._toggle_help()
                 return True
-            if shift and keyname == "h":
+            if shift and kn == "h":
                 self._toggle_header()
                 return True
             if shift and keyname in ("plus", "equal"):
@@ -2572,21 +2601,21 @@ document.addEventListener('click', function (e) {{
             if shift and keyname in ("minus", "underscore"):
                 self._shrink_note_height()
                 return True
-            if not shift and keyname == "h":
+            if not shift and kn == "h":
                 # Ctrl+h always jumps to the highlight-able notes list
                 # (works even while typing a note).
                 self._set_section("list")
                 return True
-            if not shift and keyname == "l":
+            if not shift and kn == "l":
                 # Ctrl+l: from a highlighted note, load it for editing in the
                 # add-note editor; otherwise open a fresh editor.
                 self._edit_from_list()
                 return True
-            if not shift and keyname in ("j", "k"):
+            if not shift and kn in ("j", "k"):
                 # Inside the notes list, j/k move the highlight (wrapping at
                 # the ends); elsewhere they cycle forward through sections.
                 if self._notes_zone == "list" and self._note_card_rows:
-                    self._move_highlight(1 if keyname == "j" else -1)
+                    self._move_highlight(1 if kn == "j" else -1)
                 else:
                     self._cycle_section()
                 return True
@@ -2626,10 +2655,10 @@ document.addEventListener('click', function (e) {{
 
         # Table of contents: arrow keys + Neo-Vim J/k navigation.
         if self.toc_overlay.get_visible():
-            if keyname == "Down" or keyname == "j":
+            if keyname == "Down" or kn == "j":
                 self._toc_move(1)
                 return True
-            if keyname == "Up" or keyname == "k":
+            if keyname == "Up" or kn == "k":
                 self._toc_move(-1)
                 return True
             if keyname == "Return" or keyname == "KP_Enter":
@@ -2639,10 +2668,10 @@ document.addEventListener('click', function (e) {{
         # Home screen: j/k select between "Continue where you left off" and
         # "Translations"; Enter activates the selection.
         if self._on_home:
-            if keyname in ("j", "J"):
+            if kn == "j":
                 self._home_move(1)
                 return True
-            if keyname in ("k", "K"):
+            if kn == "k":
                 self._home_move(-1)
                 return True
             if keyname in ("Return", "KP_Enter"):
@@ -2655,41 +2684,45 @@ document.addEventListener('click', function (e) {{
         if self._focus_in_text_input():
             return False
 
-        # H/L always go left/right (previous/next page).
-        if keyname in ("h", "H"):
-            self._run_js("prevPage();")
-            return True
-        if keyname in ("l", "L"):
-            self._run_js("nextPage();")
-            return True
+        # Plain letter hotkeys. Guard against Ctrl so the Ctrl+letter section
+        # above has the only say (prevents Ctrl+L from falling through to nextPage
+        # when the keyval name is uppercase "L").
+        if not ctrl:
+            # H/L always go left/right (previous/next page).
+            if kn == "h":
+                self._run_js("prevPage();")
+                return True
+            if kn == "l":
+                self._run_js("nextPage();")
+                return True
 
-        # J down / K up: navigate the highlighted note, or step verse-by-verse
-        # through the content (highlighting each verse as we go).
-        if keyname in ("j", "J"):
-            if (
-                self._active_section == "notes"
-                and self._note_card_rows
-                and self._notes_zone == "list"
-            ):
-                self._move_highlight(1)
-            else:
-                self._move_verse(1)
-            return True
-        if keyname in ("k", "K"):
-            if (
-                self._active_section == "notes"
-                and self._note_card_rows
-                and self._notes_zone == "list"
-            ):
-                self._move_highlight(-1)
-            else:
-                self._move_verse(-1)
-            return True
+            # J down / K up: navigate the highlighted note, or step
+            # verse-by-verse through the content.
+            if kn == "j":
+                if (
+                    self._active_section == "notes"
+                    and self._note_card_rows
+                    and self._notes_zone == "list"
+                ):
+                    self._move_highlight(1)
+                else:
+                    self._move_verse(1)
+                return True
+            if kn == "k":
+                if (
+                    self._active_section == "notes"
+                    and self._note_card_rows
+                    and self._notes_zone == "list"
+                ):
+                    self._move_highlight(-1)
+                else:
+                    self._move_verse(-1)
+                return True
 
-        # x deletes the highlighted note when a note is highlighted.
-        if keyname in ("x", "X") and self._notes_zone == "list":
-            self._delete_highlighted()
-            return True
+            # x deletes the highlighted note when a note is highlighted.
+            if kn == "x" and self._notes_zone == "list":
+                self._delete_highlighted()
+                return True
 
         if keyname == "Right":
             self._run_js("nextPage();")

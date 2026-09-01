@@ -12,14 +12,17 @@ typography and layout while staying true to the Omarchy look.
 - Bible translations browser (replaces recently opened)
 - Continue reading (last viewed book and page)
 - Page-specific notes (saved to JSON, bottom panel); a highlighted note can be
-  loaded into the editor with `Ctrl + l` and saved in place
+  loaded into the editor with `Ctrl + l` and saved in place; a New button always
+  lets you start a fresh note
+- Notes show the referenced verse or `General notes` next to the timestamp
 - Settings panel (`Ctrl + S`) with auto-hide top bar toggle (persisted to `settings.json`)
 - Toggleable header (`Ctrl + Shift + H`)
 - Table of contents (`Ctrl + T`) navigable with arrow keys and Neo-Vim `j`/`k`
 - Paginated reading (page breaks fit the viewport, no scrolling the text)
 - Verse-by-verse navigation in the reader (`j` / `k` highlight each verse and
   scroll it into view)
-- Notes record the highlighted verse next to the timestamp (`… · v. 5`)
+- Notes record the highlighted verse next to the timestamp (`… · v. 5`);
+  with no verse highlighted they show `General notes`
 - Home screen selectable with the keyboard (`j` / `k` + Enter)
 - Keyboard navigation: `←`/`→`, `PageUp`/`PageDown`, `Space`
 - Auto-advance across chapters (including skipping empty pages)
@@ -32,7 +35,7 @@ typography and layout while staying true to the Omarchy look.
 ## Hotkeys
 
 - `Ctrl + T` — table of contents (arrow keys / `j` / `k` to move, Enter to open)
-- `Ctrl + N` — notes panel (Ctrl+Enter to add a note)
+- `Ctrl + N` — notes panel (New button or Ctrl+Enter to add a note; Ctrl+l to edit a highlighted one)
 - `Ctrl + S` — settings
 - `Ctrl + h` — jump to the notes list (works even while typing a note)
 - `Ctrl + l` — add a note / edit the highlighted note (loads it into the editor)
