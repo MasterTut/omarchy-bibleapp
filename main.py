@@ -354,6 +354,10 @@ STYLESHEET = """
     font-weight: bold;
     margin-right: 0.15em;
   }}
+  .verse-line {{
+    margin: 0.2em 0;
+    line-height: 1.55;
+  }}
   .v-highlight {{
     background: alpha({accent}, 0.55) !important;
     color: {foreground} !important;
@@ -1383,6 +1387,8 @@ class OmarchyReader(Gtk.Application):
         sel = self._home_options[idx]
         if sel == "continue":
             self._continue_reading()
+        elif sel == "import":
+            self._on_import_epub()
         else:
             self.open_book(os.path.join(TRANSLATIONS_DIR, sel))
 
@@ -2250,8 +2256,13 @@ class OmarchyReader(Gtk.Application):
                 for i, t in enumerate(translations)
             )
             self._home_options.extend(translations)
+            home_idx += len(translations)
         else:
             items = '<div class="empty">No translations found in the <code>translations/</code> folder. Place .epub files there.</div>'
+
+        self._home_options.append("import")
+        import_idx = home_idx
+        home_idx += 1
 
         self._home_sel = 0
 
@@ -2269,7 +2280,9 @@ document.addEventListener('click', function (e) {{
   var t = e.target.closest('[data-action]') || e.target.closest('[data-file]');
   if (!t) return;
   e.preventDefault();
-  if (t.getAttribute('data-action') === 'continue') post({{type:'continue_reading'}});
+  var action = t.getAttribute('data-action');
+  if (action === 'continue') post({{type:'continue_reading'}});
+  else if (action === 'import') post({{type:'import_epub'}});
   else post({{type:'open_book', file: t.getAttribute('data-file')}});
 }});
 </script>
@@ -2281,6 +2294,12 @@ document.addEventListener('click', function (e) {{
   <div class="section">
     <div class="section-title">Bible Translations</div>
     <div class="book-list">{items}</div>
+  </div>
+  <div class="section">
+    <div class="section-title">Library</div>
+    <a id="home-{import_idx}" class="book-item" href="javascript:void(0)" data-action="import">
+      <span class="book-name">Import EPUB</span>
+    </a>
   </div>
   <div class="home-footer">j/k select · Enter open · Ctrl+[ home · Ctrl+Shift+K keys</div>
 </div>
@@ -2321,6 +2340,71 @@ document.addEventListener('click', function (e) {{
                 self.open_book(path)
         else:
             dialog.destroy()
+
+    def _on_import_epub(self):
+        """Let the user pick an EPUB and copy it into the translations folder."""
+        dialog = Gtk.FileChooserDialog(
+            title="Import EPUB into library",
+            transient_for=self.window,
+            action=Gtk.FileChooserAction.OPEN,
+        )
+        dialog.add_buttons(
+            Gtk.STOCK_CANCEL, Gtk.ResponseType.CANCEL,
+            "Import", Gtk.ResponseType.ACCEPT,
+        )
+        f = Gtk.FileFilter()
+        f.set_name("EPUB books (*.epub)")
+        f.add_pattern("*.epub")
+        dialog.add_filter(f)
+        dialog.connect("response", self._on_import_response)
+        dialog.show()
+
+    def _on_import_response(self, dialog, response):
+        if response != Gtk.ResponseType.ACCEPT:
+            dialog.destroy()
+            return
+        path = dialog.get_filename()
+        dialog.destroy()
+        if not path:
+            return
+        try:
+            book = epub.read_epub(path)
+            # Run the same parser we use at runtime to verify the book structure.
+            tmp_app = OmarchyReader()
+            tmp_app.book = book
+            tmp_app.book_path = path
+            tmp_app.chapters = []
+            tmp_app.chapter_index = 0
+            tmp_app._toc_books = []
+            tmp_app._chapter_verses = {}
+            tmp_app._prepare_chapters()
+            if len(tmp_app.chapters) < 2 or len(tmp_app._toc_books) < 1:
+                raise ValueError(
+                    "Could not detect chapters/books in this EPUB; "
+                    "it may not be a Bible translation."
+                )
+            # Check at least one chapter has verse numbers.
+            verse_found = False
+            for _, _, ch_path, _ in tmp_app.chapters[:20]:
+                with open(ch_path, "rb") as f:
+                    text = f.read().decode("utf-8", "replace")
+                annotated = tmp_app._annotate_verses(tmp_app._extract_body(text))
+                if len(re.findall(r'class="v"', annotated)) >= 3:
+                    verse_found = True
+                    break
+            if not verse_found:
+                raise ValueError(
+                    "No verse numbers found in the first chapters; "
+                    "this file may not be a Bible EPUB."
+                )
+
+            target = os.path.join(TRANSLATIONS_DIR, os.path.basename(path))
+            if os.path.abspath(path) != os.path.abspath(target):
+                shutil.copy2(path, target)
+            # Refresh the home screen so the new book appears.
+            self.show_welcome()
+        except Exception as e:
+            self.progress_label.set_text(f"Import failed: {e}")
 
     def open_book(self, path, resume_index=None, resume_page_num=None):
         self._resume_index = resume_index
@@ -2656,6 +2740,48 @@ document.addEventListener('click', function (e) {{
                 )
         return body
 
+    def _split_verses_into_lines(self, body):
+        """Split paragraphs that contain multiple verses so each verse is on
+        its own line. This makes j/k verse navigation feel like one line per
+        verse, especially for publisher EPUBs that pack many verses into a
+        single paragraph.
+        """
+        verse_span_pat = r'<span class="v" data-vn="(\d+)">\d+ </span>'
+
+        def split_paragraph(match):
+            p_open = match.group(1)
+            p_content = match.group(2)
+            markers = list(re.finditer(verse_span_pat, p_content))
+            if len(markers) < 2:
+                return match.group(0)
+            cls_match = re.search(r'class="([^"]*)"', p_open)
+            p_cls = cls_match.group(1) if cls_match else ""
+
+            # Split the content by verse markers; keep any leading text before
+            # the first marker attached to the first verse.
+            chunks = re.split(verse_span_pat, p_content)
+            lines = []
+            for i in range(1, len(chunks), 2):
+                vn = chunks[i]
+                text = chunks[i + 1] if i + 1 < len(chunks) else ""
+                if i == 1:
+                    text = chunks[0] + text
+                text = text.strip()
+                if not text:
+                    continue
+                lines.append(
+                    f'<p class="verse-line {p_cls}">'
+                    f'<span class="v" data-vn="{vn}">{vn} </span>{text}</p>'
+                )
+            return "\n".join(lines) if lines else match.group(0)
+
+        return re.sub(
+            r'(<p\b[^>]*>)(.*?)(</p>)',
+            split_paragraph,
+            body,
+            flags=re.I | re.S,
+        )
+
     # ---------------- Chapter loading ----------------
     def _do_load_chapter(self, index):
         if index < 0 or index >= len(self.chapters):
@@ -2672,7 +2798,9 @@ document.addEventListener('click', function (e) {{
         except UnicodeDecodeError:
             content = raw.decode("latin-1", "replace")
 
-        body_content = self._annotate_verses(self._extract_body(content))
+        body_content = self._split_verses_into_lines(
+            self._annotate_verses(self._extract_body(content))
+        )
         base_url = "file://" + os.path.dirname(path) + "/"
 
         html = f"""<!doctype html><html><head><meta charset="utf-8">
@@ -2713,6 +2841,8 @@ document.addEventListener('click', function (e) {{
                 self.open_book(os.path.join(TRANSLATIONS_DIR, file))
         elif mtype == "continue_reading":
             self._continue_reading()
+        elif mtype == "import_epub":
+            self._on_import_epub()
         elif mtype == "ready":
             self._is_loading = False
             self._current_verse = 0

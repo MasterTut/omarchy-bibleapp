@@ -9,7 +9,8 @@ typography and layout while staying true to the Omarchy look.
 
 ## Features
 
-- Bible translations browser (replaces recently opened)
+- Bible translations browser with an **Import EPUB** option on the home screen
+- Import validates that the EPUB can be parsed into books/chapters/verses
 - Continue reading (last viewed book and page)
 - Page-specific notes (saved to JSON, bottom panel); a highlighted note can be
   loaded into the editor with `Ctrl + l` and saved in place; a New button always
@@ -21,6 +22,8 @@ typography and layout while staying true to the Omarchy look.
 - Paginated reading (page breaks fit the viewport, no scrolling the text)
 - Verse-by-verse navigation in the reader (`j` / `k` highlight each verse and
   scroll it into view)
+- Paragraphs are automatically split so each verse appears on its own line
+  (Crossway-style EPUBs with many verses per paragraph are reformatted on load)
 - Notes record the highlighted verse next to the timestamp (`… · v. 5`);
   with no verse highlighted they show `General notes`
 - Home screen selectable with the keyboard (`j` / `k` + Enter)
@@ -48,7 +51,7 @@ typography and layout while staying true to the Omarchy look.
 - `Ctrl + B` — toggle reader mode
 - `Ctrl + O` — open a book file
 - On the home screen: `j` / `k` select Continue where you left off /
-  Translations, Enter opens
+  Translations / Import EPUB, Enter opens
 - `H` / `L` / `←` / `→` — previous / next page (always left / right)
 - `J` / `K` / `↑` / `↓` (case-insensitive) — with a note highlighted: move up /
   down the notes; with content focused: step through the verses (j/↓ down, k/↑ up)
