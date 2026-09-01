@@ -2659,22 +2659,37 @@ document.addEventListener('click', function (e) {{
     def _annotate_verses(self, body):
         """Tag verse-number markers with data-vn so J/K can step per verse.
 
-        Handles the two verse styles found in bundled translations: KJV/ASV use
-        <sup>N</sup>; ESV uses <span class="bold">N </span>. Only the style
-        that actually appears is used.
+        Handles several publisher styles: plain <sup>N</sup> (KJV/ASV),
+        <span class="bold">N </span> (ESV/EPUB), <span class="versenum">N</span>
+        (Crossway), and other class-based verse markers. Only the style that
+        actually appears is used.
         """
+        # Plain <sup> numbers (KJV/ASV, many public-domain Bibles).
         body = re.sub(
-            r"<sup>(\d+)</sup>",
+            r"<sup[^>]*>(\d+)</sup>",
             r'<sup class="v" data-vn="\1">\1</sup>',
             body,
             flags=re.I,
         )
         if len(re.findall(r'class="v"', body)) < 3:
-            esv = re.findall(r'<span class="bold">(\d+) </span>', body, flags=re.I)
-            if len(esv) >= 3:
+            # Known class-based verse markers (Crossway/ESV often use
+            # class="versenum" or class="bold").
+            body = re.sub(
+                r'<span\b[^>]*class="[^"]*(?:versenum|verse-num|verse|v|bold)[^"]*"[^>]*>(\d+)\s*</span>',
+                r'<span class="v" data-vn="\1">\1 </span>',
+                body,
+                flags=re.I,
+            )
+        if len(re.findall(r'class="v"', body)) < 3:
+            # Generic span fallback: tag plain numeric spans only if there are
+            # enough of them to look like verse numbers.
+            span_candidates = re.findall(
+                r'<span\b[^>]*>(\d+)\s*</span>', body, flags=re.I
+            )
+            if len(span_candidates) >= 3:
                 body = re.sub(
-                    r'<span class="bold">(\d+) </span>',
-                    r'<span class="bold v" data-vn="\1">\1 </span>',
+                    r'<span\b[^>]*>(\d+)\s*</span>',
+                    r'<span class="v" data-vn="\1">\1 </span>',
                     body,
                     flags=re.I,
                 )
@@ -2792,6 +2807,8 @@ document.addEventListener('click', function (e) {{
             self._show_progress(data.get("cur", 0) + 1)
             self._save_state()
             self._refresh_notes()
+        elif mtype == "jserror":
+            print("JS error:", data.get("msg"), file=sys.stderr)
 
     def _save_state(self):
         if not self.book_path:
