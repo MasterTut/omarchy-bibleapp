@@ -102,7 +102,9 @@ DEFAULT_HOTKEYS = {
     "home": "Ctrl+p",
     "home_bracket": "Ctrl+bracketleft",
     "settings": "Ctrl+s",
-    "help": "Ctrl+k",
+    "focus_notes": "Ctrl+j",
+    "focus_content": "Ctrl+k",
+    "help": "Ctrl+Shift+k",
 }
 
 HOTKEYS = dict(DEFAULT_HOTKEYS)
@@ -584,6 +586,16 @@ function showPage(idx) {
   return idx;
 }
 
+function scrollContent(delta) {
+  var el = document.querySelector('.page.active');
+  var cont = document.scrollingElement || document.documentElement;
+  if (el && el.scrollHeight > el.clientHeight) {
+    el.scrollTop += delta;
+  } else if (cont) {
+    cont.scrollTop += delta;
+  }
+}
+
 function nextPage() {
   if (!state.ready) return -2;
   if (state.pages === 0) { post({type:'edge', dir:'next'}); return -1; }
@@ -660,6 +672,7 @@ class OmarchyReader(Gtk.Application):
         self._notes_zone = "editor"
         self._note_card_rows = []
         self._highlight_index = -1
+        self._active_section = "content"
 
     def do_command_line(self, command_line):
         options = command_line.get_arguments()
@@ -1017,25 +1030,30 @@ class OmarchyReader(Gtk.Application):
     def _shrink_note_height(self, amount=40):
         self._apply_note_height(max(160, self._note_panel_height - amount))
 
-    def _toggle_notes_focus(self):
-        """Jump focus between the notes editor and the page content.
-
-        Bound to J/K. If the notes panel is hidden, show it and focus the
-        editor; otherwise toggle focus between the editor and the webview
-        (keeping the panel visible).
-        """
-        if self._notes_overlay.get_visible() and (
-            self._focus_in_text_input() or self._notes_zone == "list"
-        ):
-            self._set_notes_zone("editor")
-            self._hide_notes()
-            if self.webview:
-                self.webview.grab_focus()
-            else:
-                self.window.grab_focus()
+    def _focus_notes_section(self):
+        """Ctrl+J: focus the notes section (highlighted note list)."""
+        if not self.book_path or not self.chapters:
+            return
+        self._active_section = "notes"
+        self._show_notes()
+        if self._note_card_rows:
+            self._set_notes_zone("list")
         else:
-            self._show_notes()
             self._set_notes_zone("editor")
+
+    def _focus_content_section(self):
+        """Ctrl+K: focus the content (reader) section."""
+        self._active_section = "content"
+        self._set_notes_zone("editor")
+        if self.webview:
+            self.webview.grab_focus()
+        else:
+            self.window.grab_focus()
+
+    def _scroll_content(self, direction):
+        """J scrolls down, K scrolls up within the current page."""
+        delta = 60 if direction == "down" else -60
+        self._run_js(f"scrollContent({delta});")
 
     def _panel_focus_state(self):
         focused = self._notes_zone == "list" or self._focus_in_text_input()
@@ -1441,16 +1459,16 @@ class OmarchyReader(Gtk.Application):
         rows = [
             ("Ctrl + T", "Table of contents (arrows / j / k, Enter)"),
             ("Ctrl + N", "Notes panel (Ctrl+Enter to add)"),
+            ("Ctrl + J / Ctrl + K", "Focus notes section / content section"),
             ("Ctrl + S", "Settings"),
-            ("Ctrl + K", "Keybindings reference"),
+            ("Ctrl + Shift + K", "Keybindings reference"),
             ("Ctrl + H", "Toggle header bar"),
             ("Ctrl + [ / Ctrl + P", "Home / choose a translation"),
             ("Ctrl + B", "Toggle reader mode"),
             ("Ctrl + O", "Open a book file"),
-            ("Right / Left / Space", "Next / previous page"),
-            ("h / l", "Previous / next page · in notes: editor / note list"),
-            ("J / K", "Jump focus between notes and page"),
-            ("In notes list: jk / x", "Move highlight / delete highlighted note"),
+            ("H / L", "Previous / next page (always left / right)"),
+            ("J / K", "Notes highlighted: move up / down · content: scroll"),
+            ("x", "Delete the highlighted note"),
             ("Ctrl + Shift + +/-", "Grow / shrink note panel"),
             ("Ctrl + Right / Ctrl + Left", "Traverse chapters"),
         ]
@@ -1849,7 +1867,7 @@ document.addEventListener('click', function (e) {{
     <div class="section-title">Bible Translations</div>
     <div class="book-list">{items}</div>
   </div>
-  <div class="home-footer">Ctrl+H header · Ctrl+N notes · Ctrl+T contents · Ctrl+[ home · Ctrl+K keys</div>
+  <div class="home-footer">Ctrl+H header · Ctrl+N notes · Ctrl+T contents · Ctrl+[ home · Ctrl+Shift+K keys</div>
 </div>
 </body></html>"""
         self.webview.load_html(html, None)
@@ -2307,78 +2325,56 @@ document.addEventListener('click', function (e) {{
             return False
 
         # J/K jump focus between the notes editor and the page content.
-        # Handled before the text-input guard so it works even while the notes
-        # editor has focus.
-        if keyname == "J" or keyname == "K":
-            self._toggle_notes_focus()
-            return True
-
-        # Within the notes panel, h/l switch between the editor (enter a note)
-        # and the highlighted note list. Handled before the text-input guard so
-        # it works while the editor has focus.
-        if self._notes_overlay.get_visible() and not (
-            state & Gdk.ModifierType.CONTROL_MASK
-        ):
-            if keyname == "l":
-                if self._note_card_rows:
-                    self._set_notes_zone("list")
+        # Driven by Ctrl+J (notes) / Ctrl+K (content) so they don't collide
+        # with typing in the notes editor. Both work even while typing.
+        ctrl = bool(state & Gdk.ModifierType.CONTROL_MASK)
+        shift = bool(state & Gdk.ModifierType.SHIFT_MASK)
+        if ctrl:
+            if shift and keyname == "k":
+                self._toggle_help()
                 return True
-            if keyname == "h":
-                self._set_notes_zone("editor")
+            if not shift and keyname == "j":
+                self._focus_notes_section()
                 return True
-            if self._notes_zone == "list":
-                if keyname == "Down" or keyname == "j":
-                    self._move_highlight(1)
-                    return True
-                if keyname == "Up" or keyname == "k":
-                    self._move_highlight(-1)
-                    return True
-                if keyname in ("x", "X") or keyname == "Delete":
-                    self._delete_highlighted()
-                    return True
-
-        # When typing in a text field (e.g. the notes editor), do not intercept
-        # plain keys (SPACE, letters, ...) — otherwise they trigger page
-        # navigation. Ctrl+key hotkeys and Escape are still handled above/below.
-        if self._focus_in_text_input() and not (state & Gdk.ModifierType.CONTROL_MASK):
-            return False
-
-        if self._hotkey_matches(HOTKEYS.get("toc"), keyname, state):
-            self._toggle_toc()
-            return True
-        if self._hotkey_matches(HOTKEYS.get("note"), keyname, state):
-            self._toggle_notes()
-            return True
-        if self._hotkey_matches(HOTKEYS.get("settings"), keyname, state):
-            self._toggle_settings()
-            return True
-        if self._hotkey_matches(HOTKEYS.get("help"), keyname, state):
-            self._toggle_help()
-            return True
-        if self._hotkey_matches(HOTKEYS.get("home"), keyname, state):
-            self.show_welcome()
-            return True
-        if self._hotkey_matches(HOTKEYS.get("home_bracket"), keyname, state):
-            self.show_welcome()
-            return True
-        if self._hotkey_matches(HOTKEYS.get("toggle_header"), keyname, state):
-            self._toggle_header()
-            return True
-        if self._hotkey_matches(HOTKEYS.get("toggle_reader_mode"), keyname, state):
-            self._toggle_reader_mode()
-            return True
-        if self._hotkey_matches(HOTKEYS.get("font_increase"), keyname, state):
-            self.change_font_size(self.font_size + 2)
-            return True
-        if self._hotkey_matches(HOTKEYS.get("font_decrease"), keyname, state):
-            self.change_font_size(self.font_size - 2)
-            return True
-        if self._hotkey_matches(HOTKEYS.get("page_next"), keyname, state):
-            self._run_js("nextPage();")
-            return True
-        if self._hotkey_matches(HOTKEYS.get("page_prev"), keyname, state):
-            self._run_js("prevPage();")
-            return True
+            if not shift and keyname == "k":
+                self._focus_content_section()
+                return True
+            if self._hotkey_matches(HOTKEYS.get("toc"), keyname, state):
+                self._toggle_toc()
+                return True
+            if self._hotkey_matches(HOTKEYS.get("note"), keyname, state):
+                self._toggle_notes()
+                return True
+            if self._hotkey_matches(HOTKEYS.get("settings"), keyname, state):
+                self._toggle_settings()
+                return True
+            if self._hotkey_matches(HOTKEYS.get("home"), keyname, state):
+                self.show_welcome()
+                return True
+            if self._hotkey_matches(HOTKEYS.get("home_bracket"), keyname, state):
+                self.show_welcome()
+                return True
+            if self._hotkey_matches(HOTKEYS.get("toggle_header"), keyname, state):
+                self._toggle_header()
+                return True
+            if self._hotkey_matches(HOTKEYS.get("toggle_reader_mode"), keyname, state):
+                self._toggle_reader_mode()
+                return True
+            if self._hotkey_matches(HOTKEYS.get("font_increase"), keyname, state):
+                self.change_font_size(self.font_size + 2)
+                return True
+            if self._hotkey_matches(HOTKEYS.get("font_decrease"), keyname, state):
+                self.change_font_size(self.font_size - 2)
+                return True
+            if self._hotkey_matches(HOTKEYS.get("page_next"), keyname, state):
+                self._run_js("nextPage();")
+                return True
+            if self._hotkey_matches(HOTKEYS.get("page_prev"), keyname, state):
+                self._run_js("prevPage();")
+                return True
+            if keyname == "o":
+                self.on_open()
+                return True
 
         # Table of contents: arrow keys + Neo-Vim J/k navigation.
         if self.toc_overlay.get_visible():
@@ -2392,20 +2388,61 @@ document.addEventListener('click', function (e) {{
                 self._toc_activate_current()
                 return True
 
+        # While typing in the notes editor, let plain keys type — do not let
+        # H/L/J/K/x etc. trigger hotkeys (limit hotkeys while typing). Ctrl+
+        # combos and Escape were already handled above.
+        if self._focus_in_text_input():
+            return False
+
         # Note-panel height: Ctrl+Shift+Plus grows, Ctrl+Shift+Minus shrinks.
         if (
             keyname in ("plus", "equal")
-            and (state & Gdk.ModifierType.CONTROL_MASK)
-            and (state & Gdk.ModifierType.SHIFT_MASK)
+            and ctrl
+            and shift
         ):
             self._grow_note_height()
             return True
         if (
             keyname == "minus"
-            and (state & Gdk.ModifierType.CONTROL_MASK)
-            and (state & Gdk.ModifierType.SHIFT_MASK)
+            and ctrl
+            and shift
         ):
             self._shrink_note_height()
+            return True
+
+        # H/L always go left/right (previous/next page).
+        if keyname in ("h", "H"):
+            self._run_js("prevPage();")
+            return True
+        if keyname in ("l", "L"):
+            self._run_js("nextPage();")
+            return True
+
+        # J down / K up: navigate the highlighted note, or scroll the content.
+        if keyname in ("j", "J"):
+            if (
+                self._active_section == "notes"
+                and self._note_card_rows
+                and self._notes_zone == "list"
+            ):
+                self._move_highlight(1)
+            else:
+                self._scroll_content("down")
+            return True
+        if keyname in ("k", "K"):
+            if (
+                self._active_section == "notes"
+                and self._note_card_rows
+                and self._notes_zone == "list"
+            ):
+                self._move_highlight(-1)
+            else:
+                self._scroll_content("up")
+            return True
+
+        # x deletes the highlighted note when a note is highlighted.
+        if keyname in ("x", "X") and self._notes_zone == "list":
+            self._delete_highlighted()
             return True
 
         if keyname == "Right":
@@ -2419,15 +2456,6 @@ document.addEventListener('click', function (e) {{
             return True
         elif keyname == "Page_Up":
             self._run_js("prevPage();")
-            return True
-        elif self.book_path and keyname == "l":
-            self._run_js("nextPage();")
-            return True
-        elif self.book_path and keyname == "h":
-            self._run_js("prevPage();")
-            return True
-        elif keyname == "o" and (state & Gdk.ModifierType.CONTROL_MASK):
-            self.on_open()
             return True
         return False
 

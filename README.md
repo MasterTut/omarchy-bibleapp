@@ -29,17 +29,17 @@ typography and layout while staying true to the Omarchy look.
 - `Ctrl + T` — table of contents (arrow keys / `j` / `k` to move, Enter to open)
 - `Ctrl + N` — notes panel (Ctrl+Enter to add a note)
 - `Ctrl + S` — settings
-- `Ctrl + K` — keybinding reference
+- `Ctrl + J` / `Ctrl + K` — focus the notes section / content section
+- `Ctrl + Shift + K` — keybinding reference
 - `Ctrl + H` — toggle header
 - `Ctrl + [` / `Ctrl + P` — home / translations browser
 - `Ctrl + B` — toggle reader mode
 - `Ctrl + O` — open a book file
-- `h` / `l` — previous / next page (Vim style); inside the notes panel: switch
-  between the editor (`h`) and the highlighted note list (`l`)
-- `J` / `K` — jump focus between notes and page content
+- `H` / `L` — previous / next page (always left / right)
+- `J` / `K` — with a note highlighted: move up / down the notes; with content
+  focused: scroll up / down
+- `x` — delete the highlighted note
 - `Ctrl + Shift + +/-` — grow / shrink the notes panel
-- In the notes list: `j`/`k` or arrow keys move the highlight, `x` deletes the
-  highlighted note
 
 ## Requirements (Arch / Omarchy)
 
