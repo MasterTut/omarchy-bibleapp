@@ -2379,143 +2379,93 @@ document.addEventListener('click', function (e) {{
         if not entries:
             entries = self._parse_ncx()
 
-        self.chapters = []
+        # Some publishers (e.g. Crossway ESV) list only book-level entries in
+        # the TOC; the book file itself contains links to the chapter files.
+        # Expand those entries so each chapter becomes its own item.
+        expanded = []
         for title, href in entries:
-            name = self._resolve_href(href)
-            if not name:
-                continue
-            path = self._item_paths.get(name)
-            if not path:
-                continue
-            self.chapters.append(("", title or "Chapter", path, name))
+            intro_name = self._resolve_href(href)
+            intro_path = self._item_paths.get(intro_name)
+            if intro_path:
+                links = self._extract_chapter_links(intro_path)
+                if links:
+                    for link_text, ch_href in links:
+                        ch_name = self._resolve_href(ch_href)
+                        ch_path = self._item_paths.get(ch_name)
+                        if ch_path:
+                            expanded.append((title, f"{title} {link_text}", ch_path, ch_name))
+                    continue
+            # No chapter links: treat this entry as a chapter itself.
+            if intro_path:
+                expanded.append((title, title or "Chapter", intro_path, intro_name))
 
         # Fallback: no usable TOC, use document spine items.
-        if not self.chapters:
+        if not expanded:
             for item in self.book.get_items_of_type(ebooklib.ITEM_DOCUMENT):
                 name = item.get_name()
                 path = self._item_paths.get(name)
                 if not path:
                     continue
                 title = getattr(item, "title", None) or os.path.basename(name)
-                self.chapters.append(("", title, path, name))
+                expanded.append((title, title, path, name))
 
-        self._build_toc_tree()
+        # Group chapters into books. For Crossway, book_title is already the
+        # book name. For flat chapter lists like KJV/ASV, book_title is the
+        # same as chapter_title; re-group by removing the trailing chapter
+        # number from the title.
+        books_map = {}
+        for book_title, ch_title, path, name in expanded:
+            if book_title not in books_map:
+                books_map[book_title] = []
+            books_map[book_title].append((ch_title, path, name))
 
-    def _find_chapter_index_by_href(self, href):
-        """Map a TOC href to the chapter index in self.chapters."""
-        name = self._resolve_href(href)
-        if not name:
-            return None
-        target = name.lstrip("./")
-        for i, (_, _, _, ch_name) in enumerate(self.chapters):
-            if ch_name.lstrip("./") == target:
-                return i
-        return None
+        if all(len(chs) == 1 for chs in books_map.values()):
+            books_map = {}
+            for book_title, ch_title, path, name in expanded:
+                m = re.match(r"^(.*?)\s+(\d+)$", (ch_title or "").strip())
+                bt = m.group(1).strip() if m else book_title
+                books_map.setdefault(bt, []).append((ch_title, path, name))
 
-    def _build_toc_tree(self):
-        """Build a hierarchical book -> chapter tree from the TOC."""
-        books = []
-        raw = getattr(self.book, "toc", None) or []
-        if isinstance(raw, list):
-            for node in raw:
-                book = self._tree_from_ebooklib_node(node)
-                if book and book["chapters"]:
-                    books.append(book)
-        if not books:
-            books = self._tree_from_ncx()
-        if not books:
-            books = self._tree_from_flat_chapters()
-        self._toc_books = books
+        self.chapters = []
+        self._toc_books = []
+        for book_title, chs in books_map.items():
+            book_chapters = []
+            for ch_title, path, name in chs:
+                idx = len(self.chapters)
+                self.chapters.append(("", ch_title, path, name))
+                book_chapters.append({"title": ch_title, "index": idx, "verses": []})
+            self._toc_books.append({"title": book_title, "chapters": book_chapters})
 
-    def _tree_from_ebooklib_node(self, node):
-        """Convert an ebooklib TOC node (Link or tuple) into a book dict."""
-        if not isinstance(node, tuple):
-            return None
-        link, children = node[0], node[1]
-        if isinstance(link, str) or link is None:
-            return None
-        title = getattr(link, "title", "") or "Book"
-        chapters = []
-        for child in children:
-            ctitle, cidx = self._chapter_from_toc_link(child)
-            if cidx is not None:
-                chapters.append({"title": ctitle, "index": cidx, "verses": []})
-        return {"title": title, "chapters": chapters}
+    def _extract_chapter_links(self, intro_path):
+        """Extract chapter file links from a book introduction page.
 
-    def _chapter_from_toc_link(self, node):
-        """Return (title, chapter_index) from a leaf ebooklib TOC link."""
-        if isinstance(node, tuple):
-            link = node[0]
-        else:
-            link = node
-        if isinstance(link, str) or link is None:
-            return None, None
-        title = getattr(link, "title", "") or "Chapter"
-        href = getattr(link, "href", "")
-        idx = self._find_chapter_index_by_href(href)
-        return title, idx
-
-    def _tree_from_ncx(self):
-        """Build a book tree from the NCX navMap hierarchy."""
-        import xml.etree.ElementTree as ET
-
-        books = []
-        ncx = None
-        for item in self.book.get_items():
-            if item.get_name().lower().endswith(("toc.ncx", ".ncx")):
-                ncx = item
-                break
-        if ncx is None:
-            return books
+        Used by Crossway-style EPUBs where the TOC lists only book-level files,
+        and the book file contains links like 'Chapter 1', 'Chapter 2', ...
+        """
         try:
-            raw = (ncx.get_content() or b"").decode("utf-8", "replace")
-            root = ET.fromstring(raw)
+            with open(intro_path, "rb") as f:
+                content = f.read().decode("utf-8", "replace")
         except Exception:
-            return books
-
-        ns = ""
-        if root.tag.startswith("{"):
-            ns = root.tag.split("}")[0] + "}"
-
-        navmap = root.find(f"{ns}navMap")
-        if navmap is None:
-            return books
-
-        def navpoint_to_book(navpoint):
-            label = navpoint.find(f"{ns}navLabel/{ns}text")
-            content = navpoint.find(f"{ns}content")
-            title = (label.text or "").strip() if label is not None else ""
-            src = content.get("src", "") if content is not None else ""
-            children = navpoint.findall(f"{ns}navPoint")
-            chapters = []
-            for child in children:
-                clabel = child.find(f"{ns}navLabel/{ns}text")
-                ccontent = child.find(f"{ns}content")
-                ctitle = (clabel.text or "").strip() if clabel is not None else ""
-                csrc = ccontent.get("src", "") if ccontent is not None else ""
-                cidx = self._find_chapter_index_by_href(csrc)
-                if cidx is not None:
-                    chapters.append({"title": ctitle, "index": cidx, "verses": []})
-            if chapters:
-                return {"title": title or "Book", "chapters": chapters}
-            return None
-
-        for navpoint in navmap.findall(f"{ns}navPoint"):
-            book = navpoint_to_book(navpoint)
-            if book:
-                books.append(book)
-        return books
-
-    def _tree_from_flat_chapters(self):
-        """Group flat chapter titles like 'Genesis 1' into books by name."""
-        groups = {}
-        for i, (_, title, _, _) in enumerate(self.chapters):
-            m = re.match(r"^(.*?)\s+(\d+)$", (title or "").strip())
-            book_title = m.group(1).strip() if m else "Book"
-            groups.setdefault(book_title, []).append(
-                {"title": title or f"Chapter {i + 1}", "index": i, "verses": []}
-            )
-        return [{"title": k, "chapters": v} for k, v in groups.items()]
+            return []
+        body = self._extract_body(content)
+        links = re.findall(
+            r'<a\s+[^>]*href="([^"]*)"[^>]*>(.*?)</a>',
+            body,
+            flags=re.I | re.S,
+        )
+        result = []
+        for href, text in links:
+            text = re.sub(r"<[^>]+>", "", text)
+            text = text.replace("&nbsp;", " ").replace("\xa0", " ").strip()
+            if not text:
+                continue
+            if not re.search(r"\bchapter\b|\bch\b", text, flags=re.I):
+                continue
+            ch_name = self._resolve_href(href)
+            if not ch_name or ch_name not in self._item_paths:
+                continue
+            result.append((text, href))
+        return result
 
     def _fill_verse_numbers(self, chapter_index):
         """Populate the verse list for a chapter by reading its HTML."""
@@ -2671,27 +2621,38 @@ document.addEventListener('click', function (e) {{
             body,
             flags=re.I,
         )
+        def _tag_verse_span(match):
+            inner = match.group(1)
+            text = re.sub(r"<[^>]+>", "", inner)
+            m = re.search(r"\d+", text)
+            if not m:
+                return match.group(0)
+            vn = m.group(0)
+            return f'<span class="v" data-vn="{vn}">{vn} </span>'
+
         if len(re.findall(r'class="v"', body)) < 3:
             # Known class-based verse markers (Crossway/ESV often use
-            # class="versenum" or class="bold").
+            # class="versenum" or class="bold"). Allow nested tags like
+            # <span class="bold"><big>1</big>:1 </span>.
             body = re.sub(
-                r'<span\b[^>]*class="[^"]*(?:versenum|verse-num|verse|v|bold)[^"]*"[^>]*>(\d+)\s*</span>',
-                r'<span class="v" data-vn="\1">\1 </span>',
+                r'<span\b[^>]*class="[^"]*(?:versenum|verse-num|verse|v|bold)[^"]*"[^>]*>(.*?)</span>',
+                _tag_verse_span,
                 body,
-                flags=re.I,
+                flags=re.I | re.S,
             )
         if len(re.findall(r'class="v"', body)) < 3:
             # Generic span fallback: tag plain numeric spans only if there are
             # enough of them to look like verse numbers.
-            span_candidates = re.findall(
-                r'<span\b[^>]*>(\d+)\s*</span>', body, flags=re.I
+            candidates = re.findall(
+                r'<span\b[^>]*>(.*?)</span>', body, flags=re.I | re.S
             )
-            if len(span_candidates) >= 3:
+            numbers = [re.search(r"\d+", c) for c in candidates]
+            if len([n for n in numbers if n]) >= 3:
                 body = re.sub(
-                    r'<span\b[^>]*>(\d+)\s*</span>',
-                    r'<span class="v" data-vn="\1">\1 </span>',
+                    r'<span\b[^>]*>(.*?)</span>',
+                    _tag_verse_span,
                     body,
-                    flags=re.I,
+                    flags=re.I | re.S,
                 )
         return body
 
