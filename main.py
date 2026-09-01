@@ -1213,8 +1213,8 @@ class OmarchyReader(Gtk.Application):
         """Visual feedback for the home-screen j/k selection."""
         if not self._on_home or not self._home_options:
             return
-        sel = self._home_options[self._home_sel % len(self._home_options)]
-        target = ".section.continue" if sel == "continue" else ".book-list .book-item"
+        idx = self._home_sel % len(self._home_options)
+        target = f"#home-{idx}"
         js = (
             "var els=document.querySelectorAll('.focused');"
             "for(var i=0;i<els.length;i++)els[i].classList.remove('focused');"
@@ -1231,13 +1231,12 @@ class OmarchyReader(Gtk.Application):
     def _home_activate(self):
         if not self._home_options:
             return
-        sel = self._home_options[self._home_sel % len(self._home_options)]
+        idx = self._home_sel % len(self._home_options)
+        sel = self._home_options[idx]
         if sel == "continue":
             self._continue_reading()
         else:
-            t = list_translations()
-            if t:
-                self.open_book(os.path.join(TRANSLATIONS_DIR, t[0]))
+            self.open_book(os.path.join(TRANSLATIONS_DIR, sel))
 
     def _move_verse(self, direction):
         """J steps down / K steps up through the verses in the current page."""
@@ -1309,7 +1308,10 @@ class OmarchyReader(Gtk.Application):
         self._notes_overlay.get_style_context().remove_class("panel-focused")
         self._notes_overlay.get_style_context().remove_class("editor-active")
         self._notes_overlay.get_style_context().remove_class("list-active")
-        self.window.grab_focus()
+        if self.webview and not self._on_home:
+            self.webview.grab_focus()
+        else:
+            self.window.grab_focus()
 
     def _refresh_notes(self):
         """Rebuild the notes list for the current page."""
@@ -2074,6 +2076,7 @@ class OmarchyReader(Gtk.Application):
 
         # Continue-reading row (only if a book/page was previously saved).
         ans = ""
+        home_idx = 0
         last_file = state.get("book")
         if last_file and os.path.exists(os.path.join(TRANSLATIONS_DIR, last_file)):
             self._home_options.append("continue")
@@ -2083,21 +2086,22 @@ class OmarchyReader(Gtk.Application):
             ans = f"""
             <div class="section continue">
               <div class="section-title">Continue where you left off</div>
-              <a class="continue-item" href="javascript:void(0)" data-action="continue">
+              <a id="home-{home_idx}" class="continue-item" href="javascript:void(0)" data-action="continue">
                 <span class="cont-book">{name}</span>
                 <span class="cont-pos">Chapter {chap} · Page {page}</span>
                 <span class="cont-arrow">&#10148;</span>
               </a>
             </div>"""
+            home_idx += 1
 
         # Translation list.
         if translations:
-            self._home_options.append("translations")
             items = "".join(
-                f'<a class="book-item" href="javascript:void(0)" data-file="{t}">'
+                f'<a id="home-{home_idx + i}" class="book-item" href="javascript:void(0)" data-file="{t}">'
                 f'<span class="book-name">{_display_name(t)}</span></a>'
-                for t in translations
+                for i, t in enumerate(translations)
             )
+            self._home_options.extend(translations)
         else:
             items = '<div class="empty">No translations found in the <code>translations/</code> folder. Place .epub files there.</div>'
 
@@ -2461,6 +2465,10 @@ document.addEventListener('click', function (e) {{
             self.current_ch = data.get("pch", 0)
             self.page_count = pages
             self._show_progress(1)
+
+            # Make sure the reader has focus so j/k/h/l are handled by the page
+            # as soon as the chapter finishes loading.
+            self.webview.grab_focus()
 
             # If resuming into this chapter, jump to the saved page.
             if getattr(self, "_resume_index", None) == self.chapter_index:
