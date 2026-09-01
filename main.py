@@ -160,15 +160,36 @@ def save_state(state):
 
 
 def load_notes():
-    """Return notes dict: {location_key: [note, ...]}."""
+    """Return notes dict: {location_key: [note_entry, ...]}.
+
+    Each note entry is {"text": str, "ts": iso-timestamp}. Entries saved by
+    older versions as plain strings are migrated in place to this shape.
+    """
     try:
         with open(NOTES_PATH, "r", encoding="utf-8") as fh:
             data = json.load(fh)
-            if isinstance(data, dict):
-                return data
+            if not isinstance(data, dict):
+                return {}
     except Exception:
-        pass
-    return {}
+        return {}
+    for key in list(data.keys()):
+        items = data[key]
+        if not isinstance(items, list):
+            data[key] = []
+            continue
+        migrated = []
+        for it in items:
+            if isinstance(it, str):
+                migrated.append({"text": it, "ts": ""})
+            elif isinstance(it, dict):
+                migrated.append(
+                    {
+                        "text": str(it.get("text", "")),
+                        "ts": str(it.get("ts", "")),
+                    }
+                )
+        data[key] = [n for n in migrated if n["text"].strip()]
+    return data
 
 
 def save_notes(notes):
@@ -184,6 +205,8 @@ def save_notes(notes):
 
 DEFAULT_SETTINGS = {
     "auto_hide_header": True,
+    "auto_hide_notes": True,
+    "note_panel_height": 300,
 }
 
 SETTINGS = dict(DEFAULT_SETTINGS)
@@ -633,6 +656,7 @@ class OmarchyReader(Gtk.Application):
         self._monitor_parent_path = None
         self.notes = {}
         self._notes_overlay = None
+        self._note_panel_height = 300
 
     def do_command_line(self, command_line):
         options = command_line.get_arguments()
@@ -972,7 +996,36 @@ class OmarchyReader(Gtk.Application):
 
         self._notes_overlay.pack_start(bar, False, False, 0)
         self._notes_overlay.pack_start(body, True, True, 0)
-        self._notes_overlay.set_size_request(-1, 280)
+        self._apply_note_height(SETTINGS.get("note_panel_height", 300))
+
+    def _apply_note_height(self, height):
+        """Set the height of the notes panel and persist it to settings."""
+        self._note_panel_height = int(height)
+        if self._notes_overlay is not None:
+            self._notes_overlay.set_size_request(-1, self._note_panel_height)
+        SETTINGS["note_panel_height"] = self._note_panel_height
+        save_settings()
+
+    def _grow_note_height(self, amount=40):
+        self._apply_note_height(self._note_panel_height + amount)
+
+    def _shrink_note_height(self, amount=40):
+        self._apply_note_height(max(160, self._note_panel_height - amount))
+
+    def _toggle_notes_focus(self):
+        """Jump focus between the notes editor and the page content.
+
+        Bound to J/K. If the notes panel is hidden, show it and focus the
+        editor; otherwise toggle focus between the editor and the webview
+        (keeping the panel visible).
+        """
+        if self._focus_in_text_input():
+            if self.webview:
+                self.webview.grab_focus()
+            else:
+                self.window.grab_focus()
+        else:
+            self._show_notes()
 
     def _load_notes_from_disk(self):
         self.notes = load_notes()
@@ -1016,9 +1069,9 @@ class OmarchyReader(Gtk.Application):
         self._hide_toc()
         self._hide_settings()
         self._hide_help()
+        self._notes_overlay.set_visible(True)
         self._refresh_notes()
         self._notes_overlay.show_all()
-        self._notes_overlay.set_visible(True)
         # Focus the editor so typing a note works immediately and plain keys
         # (space, letters, ...) are not stolen by the reader's page navigator.
         self.notes_textview.grab_focus()
@@ -1059,11 +1112,21 @@ class OmarchyReader(Gtk.Application):
             row = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
             row.get_style_context().add_class("note-card")
 
-            text = Gtk.Label(label=note)
+            ntext = note.get("text", note) if isinstance(note, dict) else note
+            nts = note.get("ts") if isinstance(note, dict) else ""
+
+            text = Gtk.Label(label=str(ntext))
             text.set_xalign(0.0)
             text.set_line_wrap(True)
             text.set_halign(Gtk.Align.START)
             row.pack_start(text, False, False, 0)
+
+            if nts:
+                ts = Gtk.Label(label=nts)
+                ts.get_style_context().add_class("progress-label")
+                ts.set_xalign(0.0)
+                ts.set_halign(Gtk.Align.START)
+                row.pack_start(ts, False, False, 0)
 
             del_btn = Gtk.Button(label="Delete")
             del_btn.set_halign(Gtk.Align.END)
@@ -1094,7 +1157,11 @@ class OmarchyReader(Gtk.Application):
         key = self._note_key()
         if key is None:
             return
-        self.notes.setdefault(key, []).append(text)
+        from datetime import datetime
+
+        self.notes.setdefault(key, []).append(
+            {"text": text, "ts": datetime.now().strftime("%Y-%m-%d %H:%M")}
+        )
         self._write_notes()
         self._refresh_notes()
 
@@ -1164,6 +1231,49 @@ class OmarchyReader(Gtk.Application):
         self._settings_overlay.pack_start(bar, False, False, 0)
         self._settings_overlay.pack_start(row, False, False, 0)
 
+        # Auto-hide notes.
+        row2 = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        row2.set_margin_start(16)
+        row2.set_margin_end(16)
+        row2.set_margin_top(8)
+        row2.set_margin_bottom(8)
+
+        label_box2 = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        lbl2 = Gtk.Label(label="Auto-hide notes")
+        lbl2.set_xalign(0.0)
+        lbl2.set_halign(Gtk.Align.START)
+        label_box2.pack_start(lbl2, False, False, 0)
+
+        sub2 = Gtk.Label(
+            label="Hide the notes panel until Ctrl+N, or always keep it open."
+        )
+        sub2.get_style_context().add_class("progress-label")
+        sub2.set_xalign(0.0)
+        sub2.set_halign(Gtk.Align.START)
+        sub2.set_line_wrap(True)
+        label_box2.pack_start(sub2, False, False, 0)
+
+        switch2 = Gtk.Switch()
+        switch2.set_active(SETTINGS.get("auto_hide_notes", True))
+        switch2.set_halign(Gtk.Align.END)
+        switch2.set_valign(Gtk.Align.CENTER)
+        switch2.connect("state-set", self._on_auto_hide_notes_toggled)
+        self._auto_hide_notes_switch = switch2
+
+        row2.pack_start(label_box2, True, True, 0)
+        row2.pack_start(switch2, False, False, 0)
+
+        self._settings_overlay.pack_start(row2, False, False, 0)
+
+    def _on_auto_hide_notes_toggled(self, switch, active):
+        SETTINGS["auto_hide_notes"] = bool(active)
+        save_settings()
+        if not active:
+            self._show_notes()
+        else:
+            self._hide_notes()
+        return False
+
     def _on_auto_hide_toggled(self, switch, active):
         SETTINGS["auto_hide_header"] = bool(active)
         save_settings()
@@ -1185,6 +1295,7 @@ class OmarchyReader(Gtk.Application):
         self._settings_overlay.show_all()
         self._settings_overlay.set_visible(True)
         self._auto_hide_switch.set_active(SETTINGS.get("auto_hide_header", True))
+        self._auto_hide_notes_switch.set_active(SETTINGS.get("auto_hide_notes", True))
 
     def _hide_settings(self):
         self._settings_overlay.set_visible(False)
@@ -1220,12 +1331,13 @@ class OmarchyReader(Gtk.Application):
             ("Ctrl + S", "Settings"),
             ("Ctrl + K", "Keybindings reference"),
             ("Ctrl + H", "Toggle header bar"),
-            ("Ctrl + [", "Home / choose a translation"),
-            ("Ctrl + P", "Home / choose a translation"),
+            ("Ctrl + [ / Ctrl + P", "Home / choose a translation"),
             ("Ctrl + B", "Toggle reader mode"),
             ("Ctrl + O", "Open a book file"),
             ("Right / Left / Space", "Next / previous page"),
-            ("j / k", "Next / previous page (Vim style)"),
+            ("h / l", "Previous / next page (Vim style)"),
+            ("J / K", "Jump focus between notes and page"),
+            ("Ctrl + Shift + +/-", "Grow / shrink note panel"),
             ("Ctrl + Right / Ctrl + Left", "Traverse chapters"),
         ]
         lines = "\n".join(
@@ -1915,6 +2027,12 @@ document.addEventListener('click', function (e) {{
             self._save_state()
             if hasattr(self, "_page_pages"):
                 del self._page_pages
+            # "Always display" notes: keep the panel open across chapters.
+            if not SETTINGS.get("auto_hide_notes", True):
+                self._show_notes()
+            else:
+                self._hide_notes()
+                self._refresh_notes()
             if pages <= 0:
                 # empty chapter - advance to next non-empty automatically
                 self.next_chapter()
@@ -2049,6 +2167,13 @@ document.addEventListener('click', function (e) {{
                 return True
             return False
 
+        # J/K jump focus between the notes editor and the page content.
+        # Handled before the text-input guard so it works even while the notes
+        # editor has focus.
+        if keyname == "J" or keyname == "K":
+            self._toggle_notes_focus()
+            return True
+
         # When typing in a text field (e.g. the notes editor), do not intercept
         # plain keys (SPACE, letters, ...) — otherwise they trigger page
         # navigation. Ctrl+key hotkeys and Escape are still handled above/below.
@@ -2104,6 +2229,22 @@ document.addEventListener('click', function (e) {{
                 self._toc_activate_current()
                 return True
 
+        # Note-panel height: Ctrl+Shift+Plus grows, Ctrl+Shift+Minus shrinks.
+        if (
+            keyname in ("plus", "equal")
+            and (state & Gdk.ModifierType.CONTROL_MASK)
+            and (state & Gdk.ModifierType.SHIFT_MASK)
+        ):
+            self._grow_note_height()
+            return True
+        if (
+            keyname == "minus"
+            and (state & Gdk.ModifierType.CONTROL_MASK)
+            and (state & Gdk.ModifierType.SHIFT_MASK)
+        ):
+            self._shrink_note_height()
+            return True
+
         if keyname == "Right":
             self._run_js("nextPage();")
             return True
@@ -2116,10 +2257,10 @@ document.addEventListener('click', function (e) {{
         elif keyname == "Page_Up":
             self._run_js("prevPage();")
             return True
-        elif self.book_path and keyname == "j":
+        elif self.book_path and keyname == "l":
             self._run_js("nextPage();")
             return True
-        elif self.book_path and keyname == "k":
+        elif self.book_path and keyname == "h":
             self._run_js("prevPage();")
             return True
         elif keyname == "o" and (state & Gdk.ModifierType.CONTROL_MASK):
