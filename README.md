@@ -13,7 +13,7 @@ typography and layout while staying true to the Omarchy look.
 - Continue reading (last viewed book and page)
 - Page-specific notes (saved to JSON, bottom panel)
 - Settings panel (`Ctrl + S`) with auto-hide top bar toggle (persisted to `settings.json`)
-- Toggleable header (`Ctrl + H`)
+- Toggleable header (`Ctrl + Shift + H`)
 - Table of contents (`Ctrl + T`) navigable with arrow keys and Neo-Vim `j`/`k`
 - Paginated reading (page breaks fit the viewport, no scrolling the text)
 - Keyboard navigation: `←`/`→`, `PageUp`/`PageDown`, `Space`
@@ -29,9 +29,9 @@ typography and layout while staying true to the Omarchy look.
 - `Ctrl + T` — table of contents (arrow keys / `j` / `k` to move, Enter to open)
 - `Ctrl + N` — notes panel (Ctrl+Enter to add a note)
 - `Ctrl + S` — settings
-- `Ctrl + J` / `Ctrl + K` — focus the notes section / content section
+- `Ctrl + h/j/k/l` — cycle between sections (notes list → add a note → content)
 - `Ctrl + Shift + K` — keybinding reference
-- `Ctrl + H` — toggle header
+- `Ctrl + Shift + H` — toggle header
 - `Ctrl + [` / `Ctrl + P` — home / translations browser
 - `Ctrl + B` — toggle reader mode
 - `Ctrl + O` — open a book file

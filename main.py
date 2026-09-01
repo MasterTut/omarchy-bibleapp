@@ -94,7 +94,7 @@ DEFAULT_HOTKEYS = {
     "font_increase": "Ctrl+equal",
     "font_decrease": "Ctrl+minus",
     "toc": "Ctrl+t",
-    "toggle_header": "Ctrl+h",
+    "toggle_header": "Ctrl+Shift+h",
     "toggle_reader_mode": "Ctrl+b",
     "page_next": "Ctrl+Right",
     "page_prev": "Ctrl+Left",
@@ -102,8 +102,7 @@ DEFAULT_HOTKEYS = {
     "home": "Ctrl+p",
     "home_bracket": "Ctrl+bracketleft",
     "settings": "Ctrl+s",
-    "focus_notes": "Ctrl+j",
-    "focus_content": "Ctrl+k",
+    "cycle_section": "Ctrl+h/j/k/l",
     "help": "Ctrl+Shift+k",
 }
 
@@ -1030,25 +1029,41 @@ class OmarchyReader(Gtk.Application):
     def _shrink_note_height(self, amount=40):
         self._apply_note_height(max(160, self._note_panel_height - amount))
 
-    def _focus_notes_section(self):
-        """Ctrl+J: focus the notes section (highlighted note list)."""
+    def _set_section(self, section):
+        """Set the active section: \"list\", \"editor\", or \"content\".
+
+        This controls both focus and which keys navigate. Section changes in
+        the order list -> editor -> content (cycling).
+        """
         if not self.book_path or not self.chapters:
             return
-        self._active_section = "notes"
-        self._show_notes()
-        if self._note_card_rows:
-            self._set_notes_zone("list")
-        else:
+        if section == "list":
+            self._active_section = "notes"
+            self._show_notes()
+            if self._note_card_rows:
+                self._set_notes_zone("list")
+            else:
+                self._set_notes_zone("editor")
+        elif section == "editor":
+            self._active_section = "notes"
+            self._show_notes()
             self._set_notes_zone("editor")
+        elif section == "content":
+            self._active_section = "content"
+            self._set_notes_zone("editor")
+            if self.webview:
+                self.webview.grab_focus()
+            else:
+                self.window.grab_focus()
 
-    def _focus_content_section(self):
-        """Ctrl+K: focus the content (reader) section."""
-        self._active_section = "content"
-        self._set_notes_zone("editor")
-        if self.webview:
-            self.webview.grab_focus()
+    def _cycle_section(self):
+        """Cycle to the next section: notes list -> add a note -> content."""
+        if self._active_section == "content":
+            self._set_section("list")
+        elif self._notes_zone == "list":
+            self._set_section("editor")
         else:
-            self.window.grab_focus()
+            self._set_section("content")
 
     def _scroll_content(self, direction):
         """J scrolls down, K scrolls up within the current page."""
@@ -1343,7 +1358,7 @@ class OmarchyReader(Gtk.Application):
         lbl.set_halign(Gtk.Align.START)
         label_box.pack_start(lbl, False, False, 0)
 
-        sub = Gtk.Label(label="Start with the header hidden; Ctrl+H shows it.")
+        sub = Gtk.Label(label="Start with the header hidden; Ctrl+Shift+H shows it.")
         sub.get_style_context().add_class("progress-label")
         sub.set_xalign(0.0)
         sub.set_halign(Gtk.Align.START)
@@ -1459,14 +1474,14 @@ class OmarchyReader(Gtk.Application):
         rows = [
             ("Ctrl + T", "Table of contents (arrows / j / k, Enter)"),
             ("Ctrl + N", "Notes panel (Ctrl+Enter to add)"),
-            ("Ctrl + J / Ctrl + K", "Focus notes section / content section"),
+            ("Ctrl + h/j/k/l", "Cycle: notes list -> add note -> content"),
+            ("Ctrl + Shift + H", "Toggle header bar"),
             ("Ctrl + S", "Settings"),
             ("Ctrl + Shift + K", "Keybindings reference"),
-            ("Ctrl + H", "Toggle header bar"),
             ("Ctrl + [ / Ctrl + P", "Home / choose a translation"),
             ("Ctrl + B", "Toggle reader mode"),
             ("Ctrl + O", "Open a book file"),
-            ("H / L", "Previous / next page (always left / right)"),
+            ("H / L", "Previous / next page (left / right)"),
             ("J / K", "Notes highlighted: move up / down · content: scroll"),
             ("x", "Delete the highlighted note"),
             ("Ctrl + Shift + +/-", "Grow / shrink note panel"),
@@ -1867,7 +1882,7 @@ document.addEventListener('click', function (e) {{
     <div class="section-title">Bible Translations</div>
     <div class="book-list">{items}</div>
   </div>
-  <div class="home-footer">Ctrl+H header · Ctrl+N notes · Ctrl+T contents · Ctrl+[ home · Ctrl+Shift+K keys</div>
+  <div class="home-footer">Ctrl+Shift+H header · Ctrl+N notes · Ctrl+T contents · Ctrl+[ home · Ctrl+Shift+K keys</div>
 </div>
 </body></html>"""
         self.webview.load_html(html, None)
@@ -2277,7 +2292,7 @@ document.addEventListener('click', function (e) {{
     def _hotkey_matches(self, binding, keyname, state):
         """Return True when a configured binding (e.g. \"Ctrl+equal\") matches.
 
-        Bindings are written as modifier + key name, e.g. Ctrl+t, Ctrl+H, or a
+        Bindings are written as modifier + key name, e.g. Ctrl+t, Ctrl+Shift+h, or a
         bare key name like t. Only Ctrl is supported right now.
         """
         if not binding:
@@ -2324,20 +2339,20 @@ document.addEventListener('click', function (e) {{
                 return True
             return False
 
-        # J/K jump focus between the notes editor and the page content.
-        # Driven by Ctrl+J (notes) / Ctrl+K (content) so they don't collide
-        # with typing in the notes editor. Both work even while typing.
+        # Ctrl+Shift combos and section cycling. Ctrl+h/j/k/l cycle between the
+        # three sections (notes list -> add a note -> content); handled while
+        # typing too.
         ctrl = bool(state & Gdk.ModifierType.CONTROL_MASK)
         shift = bool(state & Gdk.ModifierType.SHIFT_MASK)
         if ctrl:
             if shift and keyname == "k":
                 self._toggle_help()
                 return True
-            if not shift and keyname == "j":
-                self._focus_notes_section()
+            if shift and keyname == "h":
+                self._toggle_header()
                 return True
-            if not shift and keyname == "k":
-                self._focus_content_section()
+            if not shift and keyname in ("h", "j", "k", "l"):
+                self._cycle_section()
                 return True
             if self._hotkey_matches(HOTKEYS.get("toc"), keyname, state):
                 self._toggle_toc()
@@ -2353,9 +2368,6 @@ document.addEventListener('click', function (e) {{
                 return True
             if self._hotkey_matches(HOTKEYS.get("home_bracket"), keyname, state):
                 self.show_welcome()
-                return True
-            if self._hotkey_matches(HOTKEYS.get("toggle_header"), keyname, state):
-                self._toggle_header()
                 return True
             if self._hotkey_matches(HOTKEYS.get("toggle_reader_mode"), keyname, state):
                 self._toggle_reader_mode()
