@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Omarchy-Bible - a minimal EPUB Bible reader styled after the Omarchy Ash theme."""
 
+import html
 import os
 import re
 import sys
@@ -413,6 +414,14 @@ STYLESHEET = """
   .home-sub {{
     color: {muted};
     margin-bottom: 28px;
+  }}
+  .home-status {{
+    background: alpha({accent}, 0.12);
+    border: 1px solid {accent};
+    border-radius: 8px;
+    padding: 10px 14px;
+    color: {foreground};
+    margin-bottom: 20px;
   }}
   .section {{
     margin-bottom: 30px;
@@ -2216,7 +2225,7 @@ class OmarchyReader(Gtk.Application):
             bottom_padding=bottom_padding,
         )
 
-    def show_welcome(self):
+    def show_welcome(self, status_msg=None):
         self._is_loading = False
         self._show_spinner(False)
         self.loading_box.set_visible(False)
@@ -2227,6 +2236,7 @@ class OmarchyReader(Gtk.Application):
         self._home_options = []
         state = load_state()
         translations = list_translations()
+        self._last_status = status_msg or ""
 
         # Continue-reading row (only if a book/page was previously saved).
         ans = ""
@@ -2265,6 +2275,9 @@ class OmarchyReader(Gtk.Application):
         home_idx += 1
 
         self._home_sel = 0
+        status_html = ""
+        if getattr(self, "_last_status", ""):
+            status_html = f'<div class="home-status">{html.escape(self._last_status)}</div>'
 
         html = f"""<!doctype html><html><head><meta charset="utf-8">
 {self._styles()}
@@ -2290,6 +2303,7 @@ document.addEventListener('click', function (e) {{
 <div class="home">
   <div class="home-title">Omarchy&#8209;Bible</div>
   <div class="home-sub">Choose a Bible translation to begin.</div>
+  {status_html}
   {ans}
   <div class="section">
     <div class="section-title">Bible Translations</div>
@@ -2369,42 +2383,46 @@ document.addEventListener('click', function (e) {{
             return
         try:
             book = epub.read_epub(path)
-            # Run the same parser we use at runtime to verify the book structure.
-            tmp_app = OmarchyReader()
-            tmp_app.book = book
-            tmp_app.book_path = path
-            tmp_app.chapters = []
-            tmp_app.chapter_index = 0
-            tmp_app._toc_books = []
-            tmp_app._chapter_verses = {}
-            tmp_app._prepare_chapters()
-            if len(tmp_app.chapters) < 2 or len(tmp_app._toc_books) < 1:
-                raise ValueError(
-                    "Could not detect chapters/books in this EPUB; "
-                    "it may not be a Bible translation."
-                )
-            # Check at least one chapter has verse numbers.
+            docs = list(book.get_items_of_type(ebooklib.ITEM_DOCUMENT))
+            if not docs:
+                raise ValueError("No readable HTML documents found.")
+
+            # Lightweight sanity check: look for verse-like markers in the first
+            # several documents. This avoids the heavy full parser instantiation
+            # during the import dialog.
+            verse_patterns = [
+                r'<sup[^>]*>\d+</sup>',
+                r'<span[^>]*class="[^"]*(?:versenum|verse-num|bold)[^"]*"[^>]*>[^<]*\d+',
+                r'<span[^>]*>[^<]*<[^>]*>\d+</[^>]*>[^<]*:\d+',
+                r'Chapter\s+\d+',
+            ]
             verse_found = False
-            for _, _, ch_path, _ in tmp_app.chapters[:20]:
-                with open(ch_path, "rb") as f:
-                    text = f.read().decode("utf-8", "replace")
-                annotated = tmp_app._annotate_verses(tmp_app._extract_body(text))
-                if len(re.findall(r'class="v"', annotated)) >= 3:
+            for doc in docs[:30]:
+                text = doc.get_content().decode("utf-8", "replace")[:20000]
+                if any(re.search(p, text, flags=re.I) for p in verse_patterns):
                     verse_found = True
                     break
             if not verse_found:
                 raise ValueError(
-                    "No verse numbers found in the first chapters; "
+                    "No verse numbers or chapter markers found; "
                     "this file may not be a Bible EPUB."
                 )
 
             target = os.path.join(TRANSLATIONS_DIR, os.path.basename(path))
             if os.path.abspath(path) != os.path.abspath(target):
                 shutil.copy2(path, target)
-            # Refresh the home screen so the new book appears.
-            self.show_welcome()
+            name = html.escape(os.path.basename(path))
+            GLib.idle_add(
+                self.show_welcome,
+                f"Imported {name}. Select it above to open.",
+            )
         except Exception as e:
-            self.progress_label.set_text(f"Import failed: {e}")
+            msg = html.escape(str(e))
+            print(f"Import failed: {e}", file=sys.stderr)
+            GLib.idle_add(
+                self.show_welcome,
+                f"Import failed: {msg}",
+            )
 
     def open_book(self, path, resume_index=None, resume_page_num=None):
         self._resume_index = resume_index
