@@ -657,6 +657,9 @@ class OmarchyReader(Gtk.Application):
         self.notes = {}
         self._notes_overlay = None
         self._note_panel_height = 300
+        self._notes_zone = "editor"
+        self._note_card_rows = []
+        self._highlight_index = -1
 
     def do_command_line(self, command_line):
         options = command_line.get_arguments()
@@ -964,17 +967,19 @@ class OmarchyReader(Gtk.Application):
         body.set_margin_bottom(12)
 
         self.notes_list = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
-        scroller = Gtk.ScrolledWindow()
+        self.notes_scroller = scroller = Gtk.ScrolledWindow()
         scroller.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
         scroller.set_vexpand(True)
         scroller.set_hexpand(True)
         scroller.add(self.notes_list)
+        scroller.get_style_context().add_class("notes-scroller")
         body.pack_start(scroller, True, True, 0)
 
         side = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
         side.set_valign(Gtk.Align.FILL)
         side.set_size_request(340, -1)
 
+        self.notes_editor_box = side
         self.notes_textview = Gtk.TextView()
         self.notes_textview.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
         self.notes_textview.set_vexpand(True)
@@ -1019,13 +1024,27 @@ class OmarchyReader(Gtk.Application):
         editor; otherwise toggle focus between the editor and the webview
         (keeping the panel visible).
         """
-        if self._focus_in_text_input():
+        if self._notes_overlay.get_visible() and (
+            self._focus_in_text_input() or self._notes_zone == "list"
+        ):
+            self._set_notes_zone("editor")
+            self._hide_notes()
             if self.webview:
                 self.webview.grab_focus()
             else:
                 self.window.grab_focus()
         else:
             self._show_notes()
+            self._set_notes_zone("editor")
+
+    def _panel_focus_state(self):
+        focused = self._notes_zone == "list" or self._focus_in_text_input()
+        ov = self._notes_overlay.get_style_context()
+        if focused:
+            ov.add_class("panel-focused")
+        else:
+            ov.remove_class("panel-focused")
+        return focused
 
     def _load_notes_from_disk(self):
         self.notes = load_notes()
@@ -1074,10 +1093,14 @@ class OmarchyReader(Gtk.Application):
         self._notes_overlay.show_all()
         # Focus the editor so typing a note works immediately and plain keys
         # (space, letters, ...) are not stolen by the reader's page navigator.
-        self.notes_textview.grab_focus()
+        self._set_notes_zone("editor")
+        self._panel_focus_state()
 
     def _hide_notes(self):
         self._notes_overlay.set_visible(False)
+        self._notes_overlay.get_style_context().remove_class("panel-focused")
+        self._notes_overlay.get_style_context().remove_class("editor-active")
+        self._notes_overlay.get_style_context().remove_class("list-active")
         self.window.grab_focus()
 
     def _refresh_notes(self):
@@ -1090,6 +1113,8 @@ class OmarchyReader(Gtk.Application):
         self.notes_loc.set_text(self._note_location_label())
         for child in self.notes_list.get_children():
             self.notes_list.remove(child)
+        self._note_card_rows = []
+        self._highlight_index = -1
 
         if key is None:
             empty = Gtk.Label(label="No page selected.")
@@ -1097,11 +1122,16 @@ class OmarchyReader(Gtk.Application):
             self.notes_list.pack_start(empty, False, False, 0)
             return
 
-        keys = [key] + self._legacy_note_keys()
+        # Merge the char-anchored key with any legacy page-anchored keys, but
+        # dedupe: on page 1 the char offset is 0 so _note_key() already equals
+        # the legacy page key — adding both would show every note twice.
+        keys = []
+        for k in [key] + self._legacy_note_keys():
+            if k and k not in keys:
+                keys.append(k)
         notes = []
         for k in keys:
-            if k:
-                notes.extend(self.notes.get(k, []))
+            notes.extend(self.notes.get(k, []))
         if not notes:
             empty = Gtk.Label(label="No notes for this page.")
             empty.get_style_context().add_class("progress-label")
@@ -1111,6 +1141,8 @@ class OmarchyReader(Gtk.Application):
         for idx, note in enumerate(notes):
             row = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
             row.get_style_context().add_class("note-card")
+            self._note_card_rows.append(row)
+            row.connect("button-press-event", lambda *_, i=idx: self._on_card_clicked(i))
 
             ntext = note.get("text", note) if isinstance(note, dict) else note
             nts = note.get("ts") if isinstance(note, dict) else ""
@@ -1136,6 +1168,87 @@ class OmarchyReader(Gtk.Application):
             self.notes_list.pack_start(row, False, False, 0)
 
         self.notes_list.show_all()
+
+    def _on_card_clicked(self, index):
+        if 0 <= index < len(self._note_card_rows):
+            self._highlight_index = index
+            self._apply_highlight()
+            if self._notes_zone != "list":
+                self._set_notes_zone("list")
+        return True
+
+    def _set_notes_zone(self, zone):
+        """Switch keyboard focus between the notes editor and the notes list."""
+        self._notes_zone = zone
+        overlay = self._notes_overlay.get_style_context()
+        overlay.remove_class("editor-active")
+        overlay.remove_class("list-active")
+        ov = self._notes_overlay.get_style_context()
+        scroller = self.notes_scroller.get_style_context()
+        editor = self.notes_editor_box.get_style_context()
+        if zone == "editor":
+            ov.add_class("editor-active")
+            editor.add_class("zone-active")
+            scroller.remove_class("zone-active")
+            self.notes_textview.grab_focus()
+        else:
+            ov.add_class("list-active")
+            scroller.add_class("zone-active")
+            editor.remove_class("zone-active")
+            if self._note_card_rows:
+                if self._highlight_index < 0:
+                    self._highlight_index = 0
+                self._apply_highlight()
+                self.notes_scroller.grab_focus()
+            else:
+                self.notes_textview.grab_focus()
+                self._notes_zone = "editor"
+                self._set_notes_zone("editor")
+
+    def _apply_highlight(self):
+        """Visually highlight the currently selected note card."""
+        for i, row in enumerate(self._note_card_rows):
+            if i == self._highlight_index:
+                row.get_style_context().add_class("selected")
+            else:
+                row.get_style_context().remove_class("selected")
+
+    def _move_highlight(self, delta):
+        if not self._note_card_rows:
+            return
+        n = len(self._note_card_rows)
+        self._highlight_index = (self._highlight_index + delta) % n
+        self._apply_highlight()
+        row = self._note_card_rows[self._highlight_index]
+        if hasattr(self, "notes_scroller") and self.notes_scroller.get_vadjustment() is not None:
+            adj = self.notes_scroller.get_vadjustment()
+            lo, hi = row.get_allocation().y, row.get_allocation().y + row.get_allocation().height
+            if adj:
+                adj.set_value(min(max(lo, adj.get_value()), max(0, hi - adj.get_page_size())))
+            self.notes_scroller.queue_draw()
+
+    def _delete_highlighted(self):
+        if self._highlight_index < 0 or self._highlight_index >= len(self._note_card_rows):
+            return
+        key = self._note_key()
+        if not key:
+            return
+        # Delete at the same index across the merged view. Gather the merged
+        # list of actual per-key lists to target the correct one.
+        keys = []
+        for k in [key] + self._legacy_note_keys():
+            if k and k not in keys:
+                keys.append(k)
+        idx = self._highlight_index
+        for k in keys:
+            lst = self.notes.get(k)
+            if lst is None:
+                continue
+            if idx < len(lst):
+                self._delete_note(k, idx)
+                self._move_highlight(0)
+                return
+            idx -= len(lst)
 
     def _on_note_textview_key(self, widget, event):
         if event.keyval in (Gdk.KEY_Return, Gdk.KEY_KP_Enter) and (
@@ -1335,8 +1448,9 @@ class OmarchyReader(Gtk.Application):
             ("Ctrl + B", "Toggle reader mode"),
             ("Ctrl + O", "Open a book file"),
             ("Right / Left / Space", "Next / previous page"),
-            ("h / l", "Previous / next page (Vim style)"),
+            ("h / l", "Previous / next page · in notes: editor / note list"),
             ("J / K", "Jump focus between notes and page"),
+            ("In notes list: jk / x", "Move highlight / delete highlighted note"),
             ("Ctrl + Shift + +/-", "Grow / shrink note panel"),
             ("Ctrl + Right / Ctrl + Left", "Traverse chapters"),
         ]
@@ -1440,14 +1554,39 @@ class OmarchyReader(Gtk.Application):
                 background-color: alpha({THEME["background"]}, 0.97);
                 border-top: 1px solid rgba(255,255,255,0.15);
             }}
+            .notes-overlay.panel-focused {{
+                background-color: alpha({THEME["background"]}, 0.88);
+            }}
+            .notes-overlay .zone-active {{
+                border-color: alpha({THEME["accent"]}, 0.8);
+            }}
+            .notes-overlay.editor-active {{
+                background-color: alpha({THEME["background"]}, 0.82);
+            }}
+            .notes-overlay.list-active {{
+                background-color: alpha({THEME["background"]}, 0.82);
+            }}
             .note-card {{
                 border: 1px solid rgba(255,255,255,0.12);
                 border-radius: 8px;
                 padding: 10px 12px;
                 background: alpha({THEME["accent"]}, 0.08);
             }}
+            .note-card.selected {{
+                border-color: alpha({THEME["accent"]}, 0.9);
+                background: alpha({THEME["accent"]}, 0.30);
+            }}
             .note-card label {{
                 color: {THEME["foreground"]};
+            }}
+            .notes-scroller {{
+                background-color: alpha({THEME["background"]}, 0.75);
+                border-radius: 8px;
+                border: 1px solid rgba(255,255,255,0.12);
+            }}
+            .notes-scroller.zone-active {{
+                background-color: alpha({THEME["background"]}, 0.55);
+                border-color: alpha({THEME["accent"]}, 0.8);
             }}
             textview {{
                 color: {THEME["foreground"]};
@@ -2173,6 +2312,30 @@ document.addEventListener('click', function (e) {{
         if keyname == "J" or keyname == "K":
             self._toggle_notes_focus()
             return True
+
+        # Within the notes panel, h/l switch between the editor (enter a note)
+        # and the highlighted note list. Handled before the text-input guard so
+        # it works while the editor has focus.
+        if self._notes_overlay.get_visible() and not (
+            state & Gdk.ModifierType.CONTROL_MASK
+        ):
+            if keyname == "l":
+                if self._note_card_rows:
+                    self._set_notes_zone("list")
+                return True
+            if keyname == "h":
+                self._set_notes_zone("editor")
+                return True
+            if self._notes_zone == "list":
+                if keyname == "Down" or keyname == "j":
+                    self._move_highlight(1)
+                    return True
+                if keyname == "Up" or keyname == "k":
+                    self._move_highlight(-1)
+                    return True
+                if keyname in ("x", "X") or keyname == "Delete":
+                    self._delete_highlighted()
+                    return True
 
         # When typing in a text field (e.g. the notes editor), do not intercept
         # plain keys (SPACE, letters, ...) — otherwise they trigger page

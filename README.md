@@ -34,9 +34,12 @@ typography and layout while staying true to the Omarchy look.
 - `Ctrl + [` / `Ctrl + P` — home / translations browser
 - `Ctrl + B` — toggle reader mode
 - `Ctrl + O` — open a book file
-- `h` / `l` — previous / next page (Vim style)
+- `h` / `l` — previous / next page (Vim style); inside the notes panel: switch
+  between the editor (`h`) and the highlighted note list (`l`)
 - `J` / `K` — jump focus between notes and page content
 - `Ctrl + Shift + +/-` — grow / shrink the notes panel
+- In the notes list: `j`/`k` or arrow keys move the highlight, `x` deletes the
+  highlighted note
 
 ## Requirements (Arch / Omarchy)
 
