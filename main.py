@@ -28,6 +28,7 @@ TRANSLATIONS_DIR = os.path.join(BASE_DIR, "translations")
 DATA_DIR = os.path.expanduser("~/.config/omarchy-bible")
 STATE_PATH = os.path.join(DATA_DIR, "state.json")
 NOTES_PATH = os.path.join(DATA_DIR, "notes.json")
+SETTINGS_PATH = os.path.join(DATA_DIR, "settings.json")
 
 # Fallback palette (Ash) used when the live omarchy theme cannot be read.
 DEFAULT_THEME = {
@@ -99,6 +100,7 @@ DEFAULT_HOTKEYS = {
     "page_prev": "Ctrl+Left",
     "note": "Ctrl+n",
     "home": "Ctrl+p",
+    "settings": "Ctrl+s",
 }
 
 HOTKEYS = dict(DEFAULT_HOTKEYS)
@@ -172,6 +174,45 @@ def save_notes(notes):
     try:
         with open(NOTES_PATH, "w", encoding="utf-8") as fh:
             json.dump(notes, fh, indent=2)
+    except Exception:
+        pass
+
+
+# ---------------- Settings persistence ----------------
+
+DEFAULT_SETTINGS = {
+    "auto_hide_header": True,
+}
+
+SETTINGS = dict(DEFAULT_SETTINGS)
+
+
+def load_settings():
+    """Load persisted app settings into the global SETTINGS dict.
+
+    Missing/partial files keep the defaults. JSON is used here for consistency
+    with the other persisted data files (state.json / notes.json).
+    """
+    data = {}
+    try:
+        with open(SETTINGS_PATH, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+            if not isinstance(data, dict):
+                data = {}
+    except Exception:
+        data = {}
+    merged = dict(DEFAULT_SETTINGS)
+    merged.update({k: v for k, v in data.items() if k in DEFAULT_SETTINGS})
+    SETTINGS.clear()
+    SETTINGS.update(merged)
+    return SETTINGS
+
+
+def save_settings():
+    _ensure_data_dir()
+    try:
+        with open(SETTINGS_PATH, "w", encoding="utf-8") as fh:
+            json.dump(SETTINGS, fh, indent=2)
     except Exception:
         pass
 
@@ -581,6 +622,7 @@ class OmarchyReader(Gtk.Application):
     def do_activate(self):
         load_theme()
         load_config()
+        load_settings()
         self.create_window()
         self.window.present()
         self._start_theme_monitor()
@@ -627,7 +669,9 @@ class OmarchyReader(Gtk.Application):
 
         self.headerbar = hb
         win.set_titlebar(hb)
-        self.headerbar.set_visible(False)
+        # Default header visibility is driven by the auto-hide-header setting.
+        if SETTINGS.get("auto_hide_header", True):
+            self.headerbar.set_visible(False)
 
         settings = WebKit2.Settings()
         settings.set_enable_javascript(True)
@@ -677,6 +721,10 @@ class OmarchyReader(Gtk.Application):
         self._build_notes_overlay()
         self.loading_overlay_win.add_overlay(self._notes_overlay)
 
+        # Settings overlay (hidden until toggled).
+        self._build_settings_overlay()
+        self.loading_overlay_win.add_overlay(self._settings_overlay)
+
         self.window = win
         win.add(self.loading_overlay_win)
         win.connect("key-press-event", self.on_key_pressed_raw)
@@ -689,6 +737,10 @@ class OmarchyReader(Gtk.Application):
         self.loading_box.set_visible(False)
         self.toc_overlay.set_visible(False)
         self._notes_overlay.set_visible(False)
+        self._settings_overlay.set_visible(False)
+        # Re-apply header visibility (show_all() blindly re-shows everything).
+        if SETTINGS.get("auto_hide_header", True):
+            self.headerbar.set_visible(False)
 
     def _build_toc_overlay(self):
         """Build the chapter-list overlay ("Table of Contents")."""
@@ -715,7 +767,7 @@ class OmarchyReader(Gtk.Application):
         bar.pack_end(count, False, False, 0)
 
         row = Gtk.ListBox()
-        row.set_selection_mode(Gtk.SelectionMode.NONE)
+        row.set_selection_mode(Gtk.SelectionMode.SINGLE)
         self.toc_list = row
         self.toc_list.set_vexpand(True)
         self.toc_list.set_margin_start(16)
@@ -739,10 +791,12 @@ class OmarchyReader(Gtk.Application):
         for r in rows:
             self.toc_list.remove(r)
         self._toc_row_index = {}
+        self._toc_rows = []
         for i, chapter in enumerate(self.chapters):
             _, title, _, _ = chapter
             row = Gtk.ListBoxRow()
             self._toc_row_index[row] = i
+            self._toc_rows.append(row)
             num = Gtk.Label(label=str(i + 1))
             num.get_style_context().add_class("toc-num")
             num.set_width_chars(4)
@@ -775,12 +829,46 @@ class OmarchyReader(Gtk.Application):
     def _show_toc(self):
         if not self.chapters:
             return
+        self._hide_notes()
+        self._hide_settings()
         self._refresh_toc()
         self.toc_overlay.show_all()
         self.toc_overlay.set_visible(True)
+        # Highlight + focus the current chapter row so arrow/J/k navigation
+        # has a starting point.
+        current = min(self.chapter_index, len(self._toc_rows) - 1)
+        if self._toc_rows:
+            self.toc_list.select_row(self._toc_rows[current])
+            self.toc_list.grab_focus()
 
     def _hide_toc(self):
         self.toc_overlay.set_visible(False)
+
+    def _toc_selected_index(self):
+        row = self.toc_list.get_selected_row()
+        if row is not None:
+            return self._toc_row_index.get(row)
+        # Fall back to the current chapter if nothing is selected yet.
+        if self._toc_rows:
+            return self.chapter_index
+        return None
+
+    def _toc_move(self, offset):
+        current = self._toc_selected_index()
+        if current is None or not self._toc_rows:
+            return
+        target = current + offset
+        if target < 0 or target >= len(self._toc_rows):
+            return
+        self.toc_list.select_row(self._toc_rows[target])
+        self.toc_list.scroll_to_row(self._toc_rows[target])
+
+    def _toc_activate_current(self):
+        if not self.toc_overlay.get_visible():
+            return
+        row = self.toc_list.get_selected_row()
+        if row is not None:
+            self._on_toc_row_activated(self.toc_list, row)
 
     def _on_toc_row_activated(self, listbox, row):
         index = self._toc_row_index.get(row)
@@ -792,50 +880,51 @@ class OmarchyReader(Gtk.Application):
 
     # ---------------- Notes ----------------
     def _build_notes_overlay(self):
-        """Build the page-specific notes panel."""
+        """Build the page-specific notes panel (a strip along the bottom)."""
         self._notes_overlay = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         self._notes_overlay.set_visible(False)
-        self._notes_overlay.set_halign(Gtk.Align.END)
-        self._notes_overlay.set_valign(Gtk.Align.FILL)
+        self._notes_overlay.set_halign(Gtk.Align.FILL)
+        self._notes_overlay.set_valign(Gtk.Align.END)
         self._notes_overlay.get_style_context().add_class("notes-overlay")
 
         bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
         bar.set_margin_start(16)
         bar.set_margin_end(16)
-        bar.set_margin_top(12)
-        bar.set_margin_bottom(8)
+        bar.set_margin_top(10)
+        bar.set_margin_bottom(6)
 
         self.notes_title = Gtk.Label(label="Notes")
         self.notes_title.get_style_context().add_class("title-label")
         self.notes_title.set_halign(Gtk.Align.START)
         bar.pack_start(self.notes_title, True, True, 0)
 
-        close = Gtk.Button(label="\u2715")
-        close.connect("clicked", lambda *_: self._hide_notes())
-        bar.pack_end(close, False, False, 0)
-
         self.notes_loc = Gtk.Label(label="")
         self.notes_loc.get_style_context().add_class("progress-label")
         bar.pack_end(self.notes_loc, False, False, 0)
 
-        self.notes_list = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
-        self.notes_list.set_margin_start(16)
-        self.notes_list.set_margin_end(16)
-        self.notes_list.set_margin_bottom(8)
+        close = Gtk.Button(label="\u2715")
+        close.connect("clicked", lambda *_: self._hide_notes())
+        bar.pack_end(close, False, False, 0)
 
+        # Body: left = notes list, right = entry + add.
+        body = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        body.set_margin_start(16)
+        body.set_margin_end(16)
+        body.set_margin_bottom(12)
+
+        self.notes_list = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
         scroller = Gtk.ScrolledWindow()
         scroller.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
         scroller.set_vexpand(True)
-        scroller.set_max_content_height(420)
-        scroller.set_min_content_width(360)
+        scroller.set_hexpand(True)
         scroller.add(self.notes_list)
+        body.pack_start(scroller, True, True, 0)
+
+        side = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        side.set_valign(Gtk.Align.CENTER)
+        side.set_size_request(320, -1)
 
         entry_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-        entry_row.set_margin_start(16)
-        entry_row.set_margin_end(16)
-        entry_row.set_margin_top(8)
-        entry_row.set_margin_bottom(16)
-
         self.notes_entry = Gtk.Entry()
         self.notes_entry.set_placeholder_text("Add a note for this page\u2026")
         self.notes_entry.connect("activate", self._on_note_entry_activated)
@@ -844,10 +933,18 @@ class OmarchyReader(Gtk.Application):
         add = Gtk.Button(label="Add")
         add.connect("clicked", self._on_note_add)
         entry_row.pack_start(add, False, False, 0)
+        side.pack_start(entry_row, False, False, 0)
+
+        hint = Gtk.Label(label="Ctrl+N to close")
+        hint.get_style_context().add_class("progress-label")
+        hint.set_halign(Gtk.Align.START)
+        side.pack_start(hint, False, False, 0)
+
+        body.pack_start(side, False, False, 0)
 
         self._notes_overlay.pack_start(bar, False, False, 0)
-        self._notes_overlay.pack_start(scroller, True, True, 0)
-        self._notes_overlay.pack_start(entry_row, False, False, 0)
+        self._notes_overlay.pack_start(body, True, True, 0)
+        self._notes_overlay.set_size_request(-1, 260)
 
     def _load_notes_from_disk(self):
         self.notes = load_notes()
@@ -876,12 +973,18 @@ class OmarchyReader(Gtk.Application):
     def _show_notes(self):
         if not self.book_path or not self.chapters:
             return
+        self._hide_toc()
+        self._hide_settings()
         self._refresh_notes()
         self._notes_overlay.show_all()
         self._notes_overlay.set_visible(True)
+        # Focus the entry so typing a note works immediately and pointer/space
+        # keys are not stolen by the reader's page navigator.
+        self.notes_entry.grab_focus()
 
     def _hide_notes(self):
         self._notes_overlay.set_visible(False)
+        self.window.grab_focus()
 
     def _refresh_notes(self):
         """Rebuild the notes list for the current page."""
@@ -954,6 +1057,86 @@ class OmarchyReader(Gtk.Application):
         self._write_notes()
         self._refresh_notes()
 
+    # ---------------- Settings ----------------
+    def _build_settings_overlay(self):
+        """Build the settings panel (opened with Ctrl+S)."""
+        self._settings_overlay = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        self._settings_overlay.set_visible(False)
+        self._settings_overlay.set_halign(Gtk.Align.CENTER)
+        self._settings_overlay.set_valign(Gtk.Align.CENTER)
+        self._settings_overlay.get_style_context().add_class("settings-overlay")
+        self._settings_overlay.set_size_request(420, -1)
+
+        bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        bar.set_margin_start(16)
+        bar.set_margin_end(16)
+        bar.set_margin_top(14)
+        bar.set_margin_bottom(8)
+
+        title = Gtk.Label(label="Settings")
+        title.get_style_context().add_class("title-label")
+        title.set_halign(Gtk.Align.START)
+        bar.pack_start(title, True, True, 0)
+
+        close = Gtk.Button(label="\u2715")
+        close.connect("clicked", lambda *_: self._hide_settings())
+        bar.pack_end(close, False, False, 0)
+
+        row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        row.set_margin_start(16)
+        row.set_margin_end(16)
+        row.set_margin_top(8)
+        row.set_margin_bottom(16)
+
+        label_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        lbl = Gtk.Label(label="Auto-hide top bar")
+        lbl.set_xalign(0.0)
+        lbl.set_halign(Gtk.Align.START)
+        label_box.pack_start(lbl, False, False, 0)
+
+        sub = Gtk.Label(label="Start with the header hidden; Ctrl+H shows it.")
+        sub.get_style_context().add_class("progress-label")
+        sub.set_xalign(0.0)
+        sub.set_halign(Gtk.Align.START)
+        label_box.pack_start(sub, False, False, 0)
+
+        switch = Gtk.Switch()
+        switch.set_active(SETTINGS.get("auto_hide_header", True))
+        switch.set_halign(Gtk.Align.END)
+        switch.set_valign(Gtk.Align.CENTER)
+        switch.connect("state-set", self._on_auto_hide_toggled)
+        self._auto_hide_switch = switch
+
+        row.pack_start(label_box, True, True, 0)
+        row.pack_start(switch, False, False, 0)
+
+        self._settings_overlay.pack_start(bar, False, False, 0)
+        self._settings_overlay.pack_start(row, False, False, 0)
+
+    def _on_auto_hide_toggled(self, switch, active):
+        SETTINGS["auto_hide_header"] = bool(active)
+        save_settings()
+        # Apply immediately: when auto-hide is on, hide the header now;
+        # when turned off, bring it back so state matches the setting.
+        self.headerbar.set_visible(not active)
+        return False
+
+    def _toggle_settings(self):
+        if self._settings_overlay.get_visible():
+            self._hide_settings()
+        else:
+            self._show_settings()
+
+    def _show_settings(self):
+        self._hide_notes()
+        self._hide_toc()
+        self._settings_overlay.show_all()
+        self._settings_overlay.set_visible(True)
+        self._auto_hide_switch.set_active(SETTINGS.get("auto_hide_header", True))
+
+    def _hide_settings(self):
+        self._settings_overlay.set_visible(False)
+
     def _apply_theme_css(self):
         css = f"""
             window {{
@@ -1009,9 +1192,19 @@ class OmarchyReader(Gtk.Application):
             .toc-overlay row:hover {{
                 background: alpha({THEME["accent"]}, 0.12);
             }}
+            .toc-overlay row:selected {{
+                background-color: alpha({THEME["accent"]}, 0.35);
+            }}
+            .toc-overlay row:selected .toc-title {{
+                color: {THEME["background"]};
+                font-weight: bold;
+            }}
+            .toc-overlay row:selected .toc-current {{
+                color: {THEME["background"]};
+            }}
             .notes-overlay {{
-                background-color: alpha({THEME["background"]}, 0.96);
-                border-left: 1px solid rgba(255,255,255,0.12);
+                background-color: alpha({THEME["background"]}, 0.97);
+                border-top: 1px solid rgba(255,255,255,0.15);
             }}
             .note-card {{
                 border: 1px solid rgba(255,255,255,0.12);
@@ -1020,6 +1213,14 @@ class OmarchyReader(Gtk.Application):
                 background: alpha({THEME["accent"]}, 0.08);
             }}
             .note-card label {{
+                color: {THEME["foreground"]};
+            }}
+            .settings-overlay {{
+                background-color: alpha({THEME["background"]}, 0.97);
+                border: 1px solid rgba(255,255,255,0.15);
+                border-radius: 12px;
+            }}
+            switch {{
                 color: {THEME["foreground"]};
             }}
             entry {{
@@ -1205,6 +1406,7 @@ class OmarchyReader(Gtk.Application):
         self._show_spinner(False)
         self.loading_box.set_visible(False)
         self._hide_notes()
+        self._hide_settings()
         state = load_state()
         translations = list_translations()
 
@@ -1674,6 +1876,21 @@ document.addEventListener('click', function (e) {{
         has_ctrl = bool(state & Gdk.ModifierType.CONTROL_MASK)
         return has_ctrl == want_ctrl
 
+    def _focus_in_text_input(self):
+        """Return True when keyboard focus is inside a text-entry widget.
+
+        This lets typing (including SPACE / letter keys) work normally in the
+        notes editor instead of being swallowed by the reader's page navigator.
+        """
+        widget = self.window.get_focus()
+        while widget is not None:
+            if isinstance(widget, Gtk.Entry):
+                return True
+            if isinstance(widget, Gtk.TextView):
+                return True
+            widget = widget.get_parent()
+        return False
+
     def on_key_pressed_raw(self, widget, event):
         keyname = Gdk.keyval_name(event.keyval)
         state = event.state
@@ -1682,9 +1899,18 @@ document.addEventListener('click', function (e) {{
             if self._notes_overlay.get_visible():
                 self._hide_notes()
                 return True
+            if self._settings_overlay.get_visible():
+                self._hide_settings()
+                return True
             if self.toc_overlay.get_visible():
                 self._hide_toc()
                 return True
+            return False
+
+        # When typing in a text field (e.g. the notes editor), do not intercept
+        # plain keys (SPACE, letters, ...) — otherwise they trigger page
+        # navigation. Ctrl+key hotkeys and Escape are still handled above/below.
+        if self._focus_in_text_input() and not (state & Gdk.ModifierType.CONTROL_MASK):
             return False
 
         if self._hotkey_matches(HOTKEYS.get("toc"), keyname, state):
@@ -1692,6 +1918,9 @@ document.addEventListener('click', function (e) {{
             return True
         if self._hotkey_matches(HOTKEYS.get("note"), keyname, state):
             self._toggle_notes()
+            return True
+        if self._hotkey_matches(HOTKEYS.get("settings"), keyname, state):
+            self._toggle_settings()
             return True
         if self._hotkey_matches(HOTKEYS.get("home"), keyname, state):
             self.show_welcome()
@@ -1714,6 +1943,18 @@ document.addEventListener('click', function (e) {{
         if self._hotkey_matches(HOTKEYS.get("page_prev"), keyname, state):
             self._run_js("prevPage();")
             return True
+
+        # Table of contents: arrow keys + Neo-Vim J/k navigation.
+        if self.toc_overlay.get_visible():
+            if keyname == "Down" or keyname == "j":
+                self._toc_move(1)
+                return True
+            if keyname == "Up" or keyname == "k":
+                self._toc_move(-1)
+                return True
+            if keyname == "Return" or keyname == "KP_Enter":
+                self._toc_activate_current()
+                return True
 
         if keyname == "Right":
             self._run_js("nextPage();")

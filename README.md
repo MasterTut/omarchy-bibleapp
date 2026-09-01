@@ -11,8 +11,10 @@ typography and layout while staying true to the Omarchy look.
 
 - Bible translations browser (replaces recently opened)
 - Continue reading (last viewed book and page)
-- Page-specific notes (saved to JSON)
-- Toggleable header (Ctrl + H)
+- Page-specific notes (saved to JSON, bottom panel)
+- Settings panel (`Ctrl + S`) with auto-hide top bar toggle (persisted to `settings.json`)
+- Toggleable header (`Ctrl + H`)
+- Table of contents (`Ctrl + T`) navigable with arrow keys and Neo-Vim `j`/`k`
 - Paginated reading (page breaks fit the viewport, no scrolling the text)
 - Keyboard navigation: `←`/`→`, `PageUp`/`PageDown`, `Space`
 - Auto-advance across chapters (including skipping empty pages)
@@ -21,6 +23,16 @@ typography and layout while staying true to the Omarchy look.
 - JetBrainsMono Nerd Font (your Omarchy font)
 - Loading indicator while the EPUB is parsed
 - Chapter + page progress in the header bar
+
+## Hotkeys
+
+- `Ctrl + T` — table of contents (arrow keys / `j` / `k` to move, Enter to open)
+- `Ctrl + N` — notes panel
+- `Ctrl + S` — settings
+- `Ctrl + H` — toggle header
+- `Ctrl + P` — home / translations browser
+- `Ctrl + B` — toggle reader mode
+- `Ctrl + O` — open a book file
 
 ## Requirements (Arch / Omarchy)
 
