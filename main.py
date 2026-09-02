@@ -62,6 +62,9 @@ class OmarchyReader(Gtk.Application):
         self._ps_tabs = {}
         self._ps_stack = None
         self._active_section = "content"
+        self._focus = "content"      # routing truth: content | notes | refs
+        self._focus_label = None     # header focus badge
+        self._hint_label = None      # header contextual tip
         self._on_home = False
         self._home_options = []
         self._home_sel = 0
@@ -256,6 +259,7 @@ class OmarchyReader(Gtk.Application):
         self.window = win
         win.add(self.loading_overlay_win)
         win.connect("key-press-event", self.on_key_pressed_raw)
+        win.connect("set-focus", self._on_set_focus)
         self._load_notes_from_disk()
 
         self.show_welcome()
@@ -433,8 +437,11 @@ class OmarchyReader(Gtk.Application):
 
     def _hide_toc(self):
         self.toc_overlay.set_visible(False)
+        if self._focus not in ("notes", "refs"):
+            self._focus = "content"
         if self.webview and not self._on_home:
             self.webview.grab_focus()
+        self._update_header_focus()
 
     def _toc_selected_index(self):
         row = self.toc_list.get_selected_row()
@@ -777,15 +784,19 @@ class OmarchyReader(Gtk.Application):
 
     def _focus_refs(self):
         self._active_section = "refs"
+        self._focus = "refs"
         if self._refs_scroller is not None:
             self._refs_scroller.grab_focus()
+        self._update_header_focus()
         return False
 
     def _focus_content(self):
         self._active_section = "content"
+        self._focus = "content"
         if self.webview:
             self.webview.grab_focus()
         self._notes_lose_focus_appearance()
+        self._update_header_focus()
         return False
 
     def _focus_notes(self):
@@ -794,17 +805,8 @@ class OmarchyReader(Gtk.Application):
         else:
             self._set_ps_tab(getattr(self, "_ps_tab", "notes"))
         self._active_section = "notes"
-        return False
-
-    def _focus_in_notes(self):
-        """True when keyboard focus is inside the Personal Space / notes panel."""
-        if self._notes_overlay is None:
-            return False
-        widget = self.window.get_focus()
-        while widget is not None:
-            if widget is self._notes_overlay:
-                return True
-            widget = widget.get_parent()
+        self._focus = "notes"
+        self._update_header_focus()
         return False
 
     def _focus_next(self, forward=True):
@@ -820,14 +822,10 @@ class OmarchyReader(Gtk.Application):
         if self._refs_overlay is not None and self._refs_overlay.get_visible():
             order.append("refs")
         if len(order) <= 1:
+            self._update_header_focus()
             return
-        if self._focus_in_refs():
-            cur = "refs"
-        elif self._focus_in_notes():
-            cur = "notes"
-        else:
-            cur = "content"
-        idx = order.index(cur) if cur in order else 0
+        cur = self._focus if self._focus in order else "content"
+        idx = order.index(cur)
         nxt = order[(idx + (1 if forward else -1)) % len(order)]
         if nxt == "content":
             self._focus_content()
@@ -835,6 +833,32 @@ class OmarchyReader(Gtk.Application):
             self._focus_notes()
         else:
             self._focus_refs()
+
+    def _on_set_focus(self, window, widget):
+        """Keep self._focus in sync with real keyboard focus (incl. mouse clicks).
+
+        Whichever panel contains the newly-focused widget becomes the routing
+        target, so tab-switch keys and reader navigation stay correct after a
+        click just as they do after Ctrl+J/K.
+        """
+        if widget is None:
+            return
+        notes = getattr(self, "_notes_overlay", None)
+        refs = getattr(self, "_refs_overlay", None)
+        w = widget
+        while w is not None:
+            if w is refs:
+                self._focus = "refs"
+                self._update_header_focus()
+                return
+            if w is notes:
+                self._focus = "notes"
+                self._update_header_focus()
+                return
+            w = w.get_parent()
+        if widget is self.webview:
+            self._focus = "content"
+            self._update_header_focus()
 
     def _scroll_refs(self, delta, big=False):
         if self._refs_scroller is None:
@@ -858,8 +882,12 @@ class OmarchyReader(Gtk.Application):
     def _hide_refs(self):
         if self._refs_overlay is not None:
             self._refs_overlay.set_visible(False)
+        if self._focus == "refs":
+            self._focus = "content"
+            self._active_section = "content"
         if self.webview and not self._on_home:
             self.webview.grab_focus()
+        self._update_header_focus()
 
     def _toggle_refs(self):
         if self._refs_overlay is not None and self._refs_overlay.get_visible():
@@ -1020,13 +1048,15 @@ class OmarchyReader(Gtk.Application):
         self._set_ps_tab("notes")
 
     def _set_section(self, section):
-        """Set the active focus section: \"notes\" (Personal Space) or \"content\"."""
+        """Set the active focus section: "notes" (Personal Space) or "content"."""
         if not self.book_path or not self.chapters:
             return
         if section == "notes":
+            self._focus = "notes"
             self._active_section = "notes"
             self._show_notes()
         elif section == "content":
+            self._focus = "content"
             self._active_section = "content"
             self._notes_lose_focus_appearance()
             if self.webview:
@@ -1034,6 +1064,7 @@ class OmarchyReader(Gtk.Application):
             else:
                 self.window.grab_focus()
             self._panel_focus_state()
+            self._update_header_focus()
 
     def _home_apply_highlight(self):
         """Visual feedback for the home-screen j/k selection."""
@@ -1149,15 +1180,22 @@ class OmarchyReader(Gtk.Application):
         self._set_ps_tab(getattr(self, "_ps_tab", "notes"))
         self._panel_focus_state()
         self._position_refs_above_notes()
+        self._focus = "notes"
+        self._active_section = "notes"
+        self._update_header_focus()
 
     def _hide_notes(self):
         self._notes_overlay.set_visible(False)
         self._notes_overlay.get_style_context().remove_class("panel-focused")
         self._position_refs_above_notes()
+        if self._focus == "notes":
+            self._focus = "content"
+            self._active_section = "content"
         if self.webview and not self._on_home:
             self.webview.grab_focus()
         else:
             self.window.grab_focus()
+        self._update_header_focus()
 
     # ---------------- Personal Space tabs ----------------
     def _set_ps_tab(self, key):
@@ -1627,6 +1665,14 @@ class OmarchyReader(Gtk.Application):
                 font-size: 13px;
                 margin-right: 8px;
             }}
+            .focus-badge {{
+                color: {THEME["background"]};
+                background-color: {THEME["accent"]};
+                border-radius: 10px;
+                padding: 1px 8px;
+                font-size: 12px;
+                font-weight: bold;
+            }}
             button {{
                 color: {THEME["foreground"]};
                 background: transparent;
@@ -1886,9 +1932,65 @@ class OmarchyReader(Gtk.Application):
         return False
 
     def _title_label(self):
+        box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        box.set_halign(Gtk.Align.CENTER)
         self.title_label = Gtk.Label(label="Omarchy-Bible")
         self.title_label.get_style_context().add_class("title-label")
-        return self.title_label
+        box.pack_start(self.title_label, False, False, 0)
+
+        self._focus_label = Gtk.Label(label="")
+        self._focus_label.get_style_context().add_class("focus-badge")
+        self._focus_label.set_visible(False)
+        box.pack_start(self._focus_label, False, False, 0)
+
+        self._hint_label = Gtk.Label(label="")
+        self._hint_label.get_style_context().add_class("progress-label")
+        self._hint_label.set_visible(False)
+        box.pack_start(self._hint_label, False, False, 0)
+
+        self._header_box = box
+        self._update_header_focus()
+        return box
+
+    _FOCUS_NAMES = {"content": "Content", "notes": "Personal Space", "refs": "Resources"}
+
+    def _context_hint(self):
+        """A short tip for the next useful action, given current state."""
+        f = self._focus
+        home = getattr(self, "_on_home", False)
+        if home or not self.chapters:
+            return "Enter open · i import · x remove"
+        if f == "notes":
+            return "Ctrl+J back to content · Ctrl+Enter add note · 1-3 tabs"
+        if f == "refs":
+            return "Ctrl+J content · 1-5 tabs · j/k scroll · h/l tabs"
+        # content
+        tips = []
+        if self._notes_overlay.get_visible():
+            tips.append("Ctrl+J ⇄ Personal Space")
+        elif self._refs_overlay is not None and self._refs_overlay.get_visible():
+            tips.append("Ctrl+J ⇄ Resources")
+        if not self._notes_overlay.get_visible():
+            tips.append("Ctrl+N notes")
+        if self._refs_overlay is not None and not self._refs_overlay.get_visible():
+            tips.append("Ctrl+R refs")
+        return " · ".join(tips) or "Ctrl+N notes · Ctrl+R refs · Ctrl+T contents"
+
+    def _update_header_focus(self):
+        if not hasattr(self, "_focus_label") or self._focus_label is None:
+            return
+        home = getattr(self, "_on_home", False)
+        if home or not self.chapters:
+            self._focus_label.set_visible(False)
+            self._hint_label.set_visible(False)
+            return
+        name = self._FOCUS_NAMES.get(self._focus, "")
+        if name:
+            self._focus_label.set_text(f"● {name}")
+            self._focus_label.set_visible(True)
+        hint = self._context_hint()
+        self._hint_label.set_text(hint)
+        self._hint_label.set_visible(bool(hint))
 
     def _fs_button(self, text, target):
         btn = Gtk.Button(label=text)
@@ -2026,6 +2128,8 @@ document.addEventListener('click', function (e) {{
  </div>
  </body></html>"""
         self.webview.load_html(page_html, None)
+        self._focus = "content"
+        self._update_header_focus()
 
     def show_loading(self, msg="Opening EPUB file"):
         # Native GTK overlay — no second load_html, so no blank-window race.
@@ -2264,7 +2368,10 @@ document.addEventListener('click', function (e) {{
 
             # Make sure the reader has focus so j/k/h/l are handled by the page
             # as soon as the chapter finishes loading.
+            self._focus = "content"
+            self._active_section = "content"
             self.webview.grab_focus()
+            self._update_header_focus()
 
             # If resuming into this chapter, jump to the saved page.
             if getattr(self, "_resume_index", None) == self.chapter_index:
@@ -2471,6 +2578,15 @@ document.addEventListener('click', function (e) {{
         # three sections (notes list -> add a note -> content); handled while
         # typing too.
         if ctrl:
+            # Ctrl+1..3 / Ctrl+Shift+1..5 switch tabs while typing is active.
+            if not shift and kn in ("1", "2", "3") and self._notes_overlay.get_visible():
+                self._set_ps_tab({"1": "notes", "2": "prayer", "3": "memory"}[kn])
+                return True
+            if shift and kn in ("1", "2", "3", "4", "5") and self._refs_overlay.get_visible():
+                key = {"1": "notes", "2": "crossrefs", "3": "intro",
+                       "4": "images", "5": "links"}[kn]
+                self._set_ref_tab(key)
+                return True
             if not shift and kn == "r":
                 # Ctrl+r toggles the reference/commentary panel.
                 self._toggle_refs()
@@ -2585,16 +2701,16 @@ document.addEventListener('click', function (e) {{
                 self._home_delete()
                 return True
 
-        # While typing in the notes editor, let plain keys type — do not let
-        # H/L/J/K/x etc. trigger hotkeys (limit hotkeys while typing). Ctrl+
-        # combos and Escape were already handled above.
-        if self._focus_in_text_input():
+        # When Personal Space is focused but the user is typing in a text field
+        # (notes editor / prayer entry), let plain keys type. Tab switching while
+        # typing is done with Ctrl+1/2/3 (handled in the Ctrl block).
+        if self._focus == "notes" and self._focus_in_text_input():
             return False
 
-        # Number keys switch tabs: 1-5 for the Resources panel, 1-3 for the
-        # Personal Space panel (Notes / Prayer / Memory), whichever is focused.
+        # Number keys switch tabs for the focused panel: 1-5 for Resources,
+        # 1-3 for Personal Space (Notes / Prayer / Memory).
         if not ctrl and not shift and kn in ("1", "2", "3", "4", "5"):
-            if self._focus_in_refs():
+            if self._focus == "refs":
                 key = {
                     "1": "notes", "2": "crossrefs", "3": "intro",
                     "4": "images", "5": "links",
@@ -2602,7 +2718,7 @@ document.addEventListener('click', function (e) {{
                 if key:
                     self._set_ref_tab(key)
                     return True
-            elif self._focus_in_notes():
+            elif self._focus == "notes":
                 key = {"1": "notes", "2": "prayer", "3": "memory"}.get(kn)
                 if key:
                     self._set_ps_tab(key)
@@ -2610,7 +2726,7 @@ document.addEventListener('click', function (e) {{
 
         # When the Resources panel is focused, j/k (and arrows) scroll it and
         # h/l switch tabs — without touching where you are in the content.
-        if self._focus_in_refs():
+        if self._focus == "refs":
             if kn in ("j", "down"):
                 self._scroll_refs(1)
                 return True
@@ -2631,20 +2747,21 @@ document.addEventListener('click', function (e) {{
                 return True
             return False
 
-        # If focus is in the reader webview, let the page's JS handle the
-        # reader navigation keys (j/k/up/down step verses, h/l/left/right page).
-        # If an overlay is visible, consume those keys instead so the reader
-        # doesn't page behind the overlay.
-        if self._focus_in_webview():
-            if self.toc_overlay.get_visible() or self._notes_overlay.get_visible():
-                if kn in ("j", "k", "up", "down", "h", "l", "left", "right"):
-                    return True
-            elif kn in ("j", "k", "up", "down", "h", "l", "left", "right"):
+        # Content focus: j/k/h/l/arrows are handled by the page's own JS (verse
+        # stepping + paging), so let them through. Space/Page keys page here.
+        if self._focus == "content":
+            if kn in ("j", "k", "up", "down", "h", "l", "left", "right"):
                 return False
+            if kn == "page_down" or kn == "space":
+                self._run_js("nextPage();")
+                return True
+            if kn == "page_up":
+                self._run_js("prevPage();")
+                return True
+            return False
 
-        # Notes list navigation removed: Personal Space is now editor/tabs based.
-
-        # Paging: h/l and arrow/page keys always work.
+        # Paging: h/l and arrow/page keys work in any non-content focus too
+        # (e.g. Personal Space browsing a tab without a text field).
         if kn in ("h", "left"):
             self._run_js("prevPage();")
             return True
