@@ -709,9 +709,14 @@ class OmarchyReader(Gtk.Application):
         tabbar.set_margin_end(16)
         tabbar.set_margin_bottom(8)
         self._ps_tabs = {}
-        for key, label in (("notes", "1 Notes"), ("prayer", "2 Prayer"), ("memory", "3 Memory")):
+        for key, label in (
+            ("notes", "1. [ Notes ]"),
+            ("prayer", "2. [ Prayer ]"),
+            ("memory", "3. [ Memory ]"),
+        ):
             b = Gtk.Button(label=label)
             b.set_relief(Gtk.ReliefStyle.NONE)
+            b.get_style_context().add_class("tab-btn")
             b.connect("clicked", lambda _w, k=key: self._set_ps_tab(k))
             tabbar.pack_start(b, False, False, 0)
             self._ps_tabs[key] = b
@@ -850,14 +855,15 @@ class OmarchyReader(Gtk.Application):
         tabs.set_margin_bottom(8)
         self._ref_tab_buttons = {}
         for key, label in (
-            ("notes", "1 Study Notes"),
-            ("crossrefs", "2 Cross-refs"),
-            ("intro", "3 Intro"),
-            ("images", "4 Images"),
-            ("links", "5 Links"),
+            ("notes", "1. [ Study Notes ]"),
+            ("crossrefs", "2. [ Cross-Refs ]"),
+            ("intro", "3. [ Intro ]"),
+            ("images", "4. [ Images ]"),
+            ("links", "5. [ Links ]"),
         ):
             btn = Gtk.Button(label=label)
             btn.set_relief(Gtk.ReliefStyle.NONE)
+            btn.get_style_context().add_class("tab-btn")
             btn.connect("clicked", lambda _b, k=key: self._set_ref_tab(k))
             tabs.pack_start(btn, False, False, 0)
             self._ref_tab_buttons[key] = btn
@@ -1943,7 +1949,7 @@ class OmarchyReader(Gtk.Application):
                 color: {THEME["foreground"]};
                 background: transparent;
                 border: 1px solid rgba(255,255,255,0.15);
-                border-radius: 8px;
+                border-radius: 0;
                 padding: 2px 8px;
                 font-family: {FONT_FAMILY};
             }}
@@ -2046,7 +2052,7 @@ class OmarchyReader(Gtk.Application):
             }}
             .note-card {{
                 border: 1px solid rgba(255,255,255,0.12);
-                border-radius: 8px;
+                border-radius: 0;
                 padding: 10px 12px;
                 background: alpha({THEME["accent"]}, 0.08);
             }}
@@ -2058,21 +2064,21 @@ class OmarchyReader(Gtk.Application):
                 color: {THEME["foreground"]};
             }}
             .notes-scroller {{
-                background-color: alpha({THEME["background"]}, 0.75);
-                border-radius: 8px;
-                border: 1px solid rgba(255,255,255,0.12);
+                background-color: transparent;
+                border-radius: 0;
+                border: none;
             }}
             .notes-scroller.zone-active {{
                 background-color: alpha({THEME["background"]}, 0.55);
-                border-color: alpha({THEME["accent"]}, 0.8);
+                border: none;
             }}
             .refs-overlay {{
                 background-color: alpha({THEME["background"]}, 0.97);
             }}
             .refs-scroller {{
-                background-color: alpha({THEME["background"]}, 0.55);
-                border-radius: 8px;
-                border: 1px solid rgba(255,255,255,0.12);
+                background-color: transparent;
+                border-radius: 0;
+                border: none;
                 padding: 4px;
             }}
             .ref-card {{
@@ -2082,16 +2088,29 @@ class OmarchyReader(Gtk.Application):
             .ref-card label {{
                 color: {THEME["foreground"]};
             }}
-            .refs-overlay button.tab-active, .notes-overlay button.tab-active {{
-                background-color: alpha({THEME["accent"]}, 0.28);
-                border-radius: 6px;
+            .tab-btn {{
+                background-color: transparent;
+                background-image: none;
+                border: none;
+                box-shadow: none;
+                border-radius: 0;
+                padding: 2px 4px;
+                margin: 0;
+                color: {THEME["muted"]};
                 font-weight: bold;
+            }}
+            .tab-btn:hover {{
+                color: {THEME["foreground"]};
+            }}
+            .tab-btn.tab-active {{
+                background-color: transparent;
+                color: {THEME["accent"]};
             }}
             textview {{
                 color: {THEME["foreground"]};
-                background-color: rgba(255,255,255,0.05);
-                border-radius: 8px;
-                border: 1px solid rgba(255,255,255,0.12);
+                background-color: transparent;
+                border-radius: 0;
+                border: none;
                 padding: 4px 6px;
             }}
             textview text {{
@@ -2117,15 +2136,18 @@ class OmarchyReader(Gtk.Application):
             .search-overlay row:selected {{
                 background-color: alpha({THEME["accent"]}, 0.35);
                 color: {THEME["foreground"]};
-                border-radius: 6px;
+                border-radius: 0;
             }}
             switch {{
                 color: {THEME["foreground"]};
             }}
             entry {{
                 color: {THEME["foreground"]};
-                background-color: rgba(255,255,255,0.05);
-                border-radius: 6px;
+                background-color: transparent;
+                background-image: none;
+                border: none;
+                border-radius: 0;
+                box-shadow: none;
             }}
             """
         provider = Gtk.CssProvider()
