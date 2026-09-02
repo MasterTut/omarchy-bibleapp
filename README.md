@@ -48,14 +48,19 @@ typography and layout while staying true to the Omarchy look.
 
 - `Ctrl + T` — table of contents: books → chapters → verses (arrow keys / `j` /
   `k` to move, `Enter` to open, `h` / `Back` / `Esc` to go back)
-- `Ctrl + N` — notes panel (New button or Ctrl+Enter to add a note; Ctrl+l to edit a highlighted one)
-- `Ctrl + R` — Resources panel above the notes: Notes · Cross-refs · Introduction ·
-  Images · Links; switch tabs with `1`–`5` (or click); `Ctrl + Shift + +/-` resizes it
+- `Ctrl + N` — Personal Notes panel (New button or Ctrl+Enter to add a note;
+  Ctrl+l to edit a highlighted one)
+- `Ctrl + R` — Resources panel above the notes: **1 Notes · 2 Cross-refs ·
+  3 Intro · 4 Images · 5 Links**. When focused, `j`/`k` scroll it and `h`/`l`
+  switch tabs (this does not move your place in the reading content);
+  `Ctrl + Shift + +/-` resizes it
 - `Ctrl + S` — settings
 - `Ctrl + h` — jump to the notes list (works even while typing a note)
 - `Ctrl + l` — add a note / edit the highlighted note (loads it into the editor)
-- `Ctrl + j` / `Ctrl + k` — notes list: move the highlight (wraps at the ends);
-  elsewhere: cycle sections (notes list → add a note → content)
+- `Ctrl + j` / `Ctrl + k` — move focus between content ⇄ personal notes ⇄
+  resources (also works while typing a note)
+- Mouse: click the reading area, the notes panel, or the resources panel to move
+  focus there directly
 - `Ctrl + Shift + K` — keybinding reference
 - `Ctrl + Shift + H` — toggle header
 - `Ctrl + [` / `Ctrl + P` — home / translations browser

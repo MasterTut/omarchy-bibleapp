@@ -977,6 +977,9 @@ class OmarchyReader(Gtk.Application):
         self.webview.set_app_paintable(True)
         self.webview.connect("context-menu", self._suppress_menu)
         self.webview.connect("load-changed", self.on_load_changed)
+        self.webview.connect(
+            "button-press-event", lambda *_: self._focus_content() or False
+        )
         self._apply_webview_bg()
         self._apply_user_stylesheet()
 
@@ -1330,7 +1333,7 @@ class OmarchyReader(Gtk.Application):
         bar.set_margin_top(10)
         bar.set_margin_bottom(6)
 
-        self.notes_title = Gtk.Label(label="Notes")
+        self.notes_title = Gtk.Label(label="Personal Notes")
         self.notes_title.get_style_context().add_class("title-label")
         self.notes_title.set_halign(Gtk.Align.START)
         bar.pack_start(self.notes_title, True, True, 0)
@@ -1386,7 +1389,7 @@ class OmarchyReader(Gtk.Application):
         add.connect("clicked", self._on_note_add)
         add_row.pack_start(add, False, False, 0)
 
-        hint = Gtk.Label(label="Ctrl+Enter to save \u00b7 Ctrl+N to close")
+        hint = Gtk.Label(label="Ctrl+Enter save \u00b7 Ctrl+J to content \u00b7 Ctrl+N close")
         hint.get_style_context().add_class("progress-label")
         add_row.pack_start(hint, True, True, 0)
         side.pack_start(add_row, False, False, 0)
@@ -1434,11 +1437,11 @@ class OmarchyReader(Gtk.Application):
         tabs.set_margin_bottom(8)
         self._ref_tab_buttons = {}
         for key, label in (
-            ("notes", "Notes"),
-            ("crossrefs", "Cross-refs"),
-            ("intro", "Introduction"),
-            ("images", "Images"),
-            ("links", "Links"),
+            ("notes", "1 Study Notes"),
+            ("crossrefs", "2 Cross-refs"),
+            ("intro", "3 Intro"),
+            ("images", "4 Images"),
+            ("links", "5 Links"),
         ):
             btn = Gtk.Button(label=label)
             btn.set_relief(Gtk.ReliefStyle.NONE)
@@ -1451,9 +1454,11 @@ class OmarchyReader(Gtk.Application):
         self._refs_body.set_margin_start(16)
         self._refs_body.set_margin_end(16)
         self._refs_body.set_margin_bottom(12)
-        scroller = Gtk.ScrolledWindow()
+        self._refs_scroller = scroller = Gtk.ScrolledWindow()
         scroller.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
         scroller.set_vexpand(True)
+        scroller.set_can_focus(True)
+        scroller.connect("button-press-event", lambda *_: self._focus_refs())
         scroller.add(self._refs_body)
         scroller.get_style_context().add_class("refs-scroller")
 
@@ -1466,6 +1471,14 @@ class OmarchyReader(Gtk.Application):
             self._refs_pinned = None
         self._refs_tab = key
         self._refresh_refs()
+        self._focus_refs()
+
+    def _next_ref_tab(self, delta):
+        order = list(self._ref_tab_buttons.keys())
+        if self._refs_tab not in order:
+            return order[0]
+        idx = (order.index(self._refs_tab) + delta) % len(order)
+        return order[idx]
 
     def _sync_ref_tab_buttons(self):
         for key, btn in self._ref_tab_buttons.items():
@@ -1475,12 +1488,79 @@ class OmarchyReader(Gtk.Application):
             else:
                 ctx.remove_class("tab-active")
 
+    def _focus_in_refs(self):
+        """True when keyboard focus is inside the Resources panel."""
+        if self._refs_overlay is None:
+            return False
+        widget = self.window.get_focus()
+        while widget is not None:
+            if widget is self._refs_overlay:
+                return True
+            if widget is self._notes_overlay or widget is self.toc_overlay:
+                return False
+            widget = widget.get_parent()
+        return False
+
+    def _focus_refs(self):
+        self._active_section = "refs"
+        if self._refs_scroller is not None:
+            self._refs_scroller.grab_focus()
+        return False
+
+    def _focus_content(self):
+        self._active_section = "content"
+        if self.webview:
+            self.webview.grab_focus()
+        self._notes_lose_focus_appearance()
+        return False
+
+    def _focus_notes(self):
+        if not self._notes_overlay.get_visible():
+            self._show_notes()
+        self._active_section = "notes"
+        self._set_notes_zone("editor")
+        return False
+
+    def _focus_next(self, forward=True):
+        """Move keyboard focus between content, personal notes, and resources."""
+        order = ["content", "notes"]
+        if self._refs_overlay is not None and self._refs_overlay.get_visible():
+            order.append("refs")
+        if self._focus_in_refs():
+            cur = "refs"
+        elif self._focus_in_text_input() or self._notes_overlay.get_visible():
+            cur = "notes"
+        else:
+            cur = "content"
+        idx = order.index(cur) if cur in order else 0
+        nxt = order[(idx + (1 if forward else -1)) % len(order)]
+        if nxt == "content":
+            self._focus_content()
+        elif nxt == "notes":
+            self._focus_notes()
+        else:
+            if not self._refs_overlay.get_visible():
+                self._show_refs()
+            self._focus_refs()
+
+    def _scroll_refs(self, delta, big=False):
+        if self._refs_scroller is None:
+            return
+        adj = self._refs_scroller.get_vadjustment()
+        step = adj.get_page_increment() if big else adj.get_step_increment()
+        if step <= 0:
+            step = 240 if big else 30
+        new = adj.get_value() + delta * step
+        new = max(adj.get_lower(), min(new, adj.get_upper() - adj.get_page_size()))
+        adj.set_value(new)
+
     def _show_refs(self):
         if not self.book_path or not self.chapters:
             return
         self._refs_overlay.set_visible(True)
         self._position_refs_above_notes()
         self._refresh_refs()
+        self._focus_refs()
 
     def _hide_refs(self):
         if self._refs_overlay is not None:
@@ -1998,10 +2078,14 @@ class OmarchyReader(Gtk.Application):
             self._move_highlight(0)
 
     def _on_note_textview_key(self, widget, event):
-        if event.keyval in (Gdk.KEY_Return, Gdk.KEY_KP_Enter) and (
-            event.state & Gdk.ModifierType.CONTROL_MASK
-        ):
+        ctrl = bool(event.state & Gdk.ModifierType.CONTROL_MASK)
+        if ctrl and event.keyval in (Gdk.KEY_Return, Gdk.KEY_KP_Enter):
             self._add_note()
+            return True
+        # The text view would otherwise eat Ctrl+J / Ctrl+K (line feed), so
+        # route those to section focus-cycling here.
+        if ctrl and event.keyval in (Gdk.KEY_j, Gdk.KEY_k):
+            self._focus_next(forward=(event.keyval == Gdk.KEY_j))
             return True
         return False
 
@@ -2216,12 +2300,13 @@ class OmarchyReader(Gtk.Application):
 
         rows = [
             ("Ctrl + T", "Table of contents: books · chapters · verses (j/k, Enter, h/Back)"),
-            ("Ctrl + N", "Notes panel (New button / Ctrl+Enter to add)"),
+            ("Ctrl + N", "Personal Notes panel (New button / Ctrl+Enter to add)"),
             ("Ctrl + R", "Resources panel: Notes · Cross-refs · Intro · Images · Links"),
             ("1 – 5", "Switch the Resources panel tab (when open)"),
+            ("Ctrl + j / k", "Move focus: content ⇄ personal notes ⇄ resources"),
+            ("j / k (resources)", "Scroll the Resources panel · h / l switch tabs"),
             ("Ctrl + h", "Jump to notes list (works while typing)"),
             ("Ctrl + l", "Add a note / edit the highlighted note"),
-            ("Ctrl + j / k", "Notes list: move highlight · elsewhere: cycle sections"),
             ("Ctrl + Shift + H", "Toggle header bar"),
             ("Ctrl + S", "Settings"),
             ("Ctrl + Shift + K", "Keybindings reference"),
@@ -2387,6 +2472,11 @@ class OmarchyReader(Gtk.Application):
             }}
             .ref-card label {{
                 color: {THEME["foreground"]};
+            }}
+            .refs-overlay button.tab-active {{
+                background-color: alpha({THEME["accent"]}, 0.28);
+                border-radius: 6px;
+                font-weight: bold;
             }}
             textview {{
                 color: {THEME["foreground"]};
@@ -3829,12 +3919,9 @@ document.addEventListener('click', function (e) {{
                 self._edit_from_list()
                 return True
             if not shift and kn in ("j", "k"):
-                # Inside the notes list, j/k move the highlight (wrapping at
-                # the ends); elsewhere they cycle forward through sections.
-                if self._notes_zone == "list" and self._note_card_rows:
-                    self._move_highlight(1 if kn == "j" else -1)
-                else:
-                    self._cycle_section()
+                # Ctrl+j / Ctrl+k move keyboard focus between sections:
+                # content <-> personal notes <-> resources.
+                self._focus_next(forward=(kn == "j"))
                 return True
             if self._hotkey_matches(HOTKEYS.get("toc"), keyname, state):
                 self._toggle_toc()
@@ -3927,6 +4014,29 @@ document.addEventListener('click', function (e) {{
             key = {"1": "notes", "2": "crossrefs", "3": "intro", "4": "images", "5": "links"}[kn]
             self._set_ref_tab(key)
             return True
+
+        # When the Resources panel is focused, j/k (and arrows) scroll it and
+        # h/l switch tabs — without touching where you are in the content.
+        if self._focus_in_refs():
+            if kn in ("j", "down"):
+                self._scroll_refs(1)
+                return True
+            if kn in ("k", "up"):
+                self._scroll_refs(-1)
+                return True
+            if kn in ("space", "page_down"):
+                self._scroll_refs(1, big=True)
+                return True
+            if kn == "page_up":
+                self._scroll_refs(-1, big=True)
+                return True
+            if kn in ("l", "right"):
+                self._set_ref_tab(self._next_ref_tab(1))
+                return True
+            if kn in ("h", "left"):
+                self._set_ref_tab(self._next_ref_tab(-1))
+                return True
+            return False
 
         # If focus is in the reader webview, let the page's JS handle the
         # reader navigation keys (j/k/up/down step verses, h/l/left/right page).
