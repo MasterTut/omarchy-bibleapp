@@ -1834,6 +1834,7 @@ class OmarchyReader(Gtk.Application):
         self._do_load_chapter(idx)
         self._focus_content()
 
+    def _apply_theme_css(self):
         css = f"""
             window {{
                 background-color: {THEME["background"]};
