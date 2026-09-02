@@ -22,6 +22,10 @@ typography and layout while staying true to the Omarchy look.
 - Paginated reading (page breaks fit the viewport, no scrolling the text)
 - Verse-by-verse navigation in the reader (`j` / `k` highlight each verse and
   scroll it into view)
+- Reference / commentary panel (`Ctrl + R`): study-Bible footnote and
+  cross-reference markers (`[1]`, `<sup>`, `title="…"` links) are extracted per
+  verse and shown in a hideable strip above the notes; clicking a marker in the
+  text pins its note
 - Paragraphs are automatically split so each verse appears on its own line
   (Crossway-style EPUBs with many verses per paragraph are reformatted on load)
 - Notes record the highlighted verse next to the timestamp (`… · v. 5`);

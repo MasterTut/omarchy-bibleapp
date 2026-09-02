@@ -5,6 +5,8 @@ import html
 import os
 import re
 import sys
+import threading
+import zipfile
 import json
 import tomllib
 import tempfile
@@ -702,6 +704,31 @@ document.addEventListener('keydown', function (e) {
   }
 });
 
+// Intercept clicks on reference/commentary markers (<a> with a title or an
+// in-book #fragment) and send the note text to the Python panel instead of
+// letting the webview navigate away.
+document.addEventListener('click', function (e) {
+  if (!e.target.closest) return;
+  var a = e.target.closest('a[href]');
+  if (!a) return;
+  var href = a.getAttribute('href') || '';
+  var title = a.getAttribute('title') || '';
+  if (!title && href.indexOf('#') === -1) return;
+  e.preventDefault();
+  var label = (a.textContent || '').trim();
+  var text = title;
+  if (!text && href.indexOf('#') !== -1) {
+    var frag = href.split('#').pop();
+    try { frag = decodeURIComponent(frag); } catch (err) {}
+    var t = document.getElementById(frag);
+    if (t) {
+      var box = t.closest ? (t.closest('p,li,div,blockquote') || t.parentNode) : t.parentNode;
+      text = ((box || t).textContent || '').trim();
+    }
+  }
+  post({type: 'ref', label: label, text: text});
+});
+
 function showPage(idx) {
   if (!state.ready || state.pages === 0) return 0;
   if (idx < 0) idx = 0;
@@ -820,6 +847,10 @@ class OmarchyReader(Gtk.Application):
         self.book_path = None
         self.chapters = []
         self._chapter_verses = {}
+        self._chapter_refs = {}
+        self._item_text_cache = {}
+        self._refs_overlay = None
+        self._refs_pinned = None
         self.chapter_index = 0
         self.current_page = 0
         self.current_ch = 0
@@ -957,6 +988,10 @@ class OmarchyReader(Gtk.Application):
         self._build_notes_overlay()
         self.loading_overlay_win.add_overlay(self._notes_overlay)
 
+        # References panel (study notes; hidden until Ctrl+R).
+        self._build_refs_overlay()
+        self.loading_overlay_win.add_overlay(self._refs_overlay)
+
         # Settings overlay (hidden until toggled).
         self._build_settings_overlay()
         self.loading_overlay_win.add_overlay(self._settings_overlay)
@@ -977,6 +1012,7 @@ class OmarchyReader(Gtk.Application):
         self.loading_box.set_visible(False)
         self.toc_overlay.set_visible(False)
         self._notes_overlay.set_visible(False)
+        self._refs_overlay.set_visible(False)
         self._settings_overlay.set_visible(False)
         self._help_overlay.set_visible(False)
         # Re-apply header visibility (show_all() blindly re-shows everything).
@@ -1305,6 +1341,127 @@ class OmarchyReader(Gtk.Application):
         self._notes_overlay.pack_start(body, True, True, 0)
         self._apply_note_height(SETTINGS.get("note_panel_height", 300))
 
+    def _build_refs_overlay(self):
+        """Build the reference/commentary panel (a strip above the notes)."""
+        self._refs_overlay = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        self._refs_overlay.set_visible(False)
+        self._refs_overlay.set_halign(Gtk.Align.FILL)
+        self._refs_overlay.set_valign(Gtk.Align.END)
+        self._refs_overlay.set_size_request(-1, 240)
+        self._refs_overlay.get_style_context().add_class("refs-overlay")
+
+        bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        bar.set_margin_start(16)
+        bar.set_margin_end(16)
+        bar.set_margin_top(10)
+        bar.set_margin_bottom(6)
+
+        title = Gtk.Label(label="References")
+        title.get_style_context().add_class("title-label")
+        title.set_halign(Gtk.Align.START)
+        bar.pack_start(title, True, True, 0)
+
+        self.refs_loc = Gtk.Label(label="")
+        self.refs_loc.get_style_context().add_class("progress-label")
+        bar.pack_end(self.refs_loc, False, False, 0)
+
+        close = Gtk.Button(label="\u2715")
+        close.connect("clicked", lambda *_: self._hide_refs())
+        bar.pack_end(close, False, False, 0)
+
+        self._refs_body = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        self._refs_body.set_margin_start(16)
+        self._refs_body.set_margin_end(16)
+        self._refs_body.set_margin_bottom(12)
+        scroller = Gtk.ScrolledWindow()
+        scroller.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        scroller.set_vexpand(True)
+        scroller.add(self._refs_body)
+        scroller.get_style_context().add_class("refs-scroller")
+
+        self._refs_overlay.pack_start(bar, False, False, 0)
+        self._refs_overlay.pack_start(scroller, True, True, 0)
+
+    def _show_refs(self):
+        if not self.book_path or not self.chapters:
+            return
+        self._refs_overlay.set_visible(True)
+        self._position_refs_above_notes()
+        self._refresh_refs()
+
+    def _hide_refs(self):
+        if self._refs_overlay is not None:
+            self._refs_overlay.set_visible(False)
+        if self.webview and not self._on_home:
+            self.webview.grab_focus()
+
+    def _toggle_refs(self):
+        if self._refs_overlay is not None and self._refs_overlay.get_visible():
+            self._hide_refs()
+        else:
+            self._show_refs()
+
+    def _position_refs_above_notes(self):
+        """Stack the refs panel directly above the notes strip when both are open."""
+        if self._refs_overlay is None:
+            return
+        if self._notes_overlay is not None and self._notes_overlay.get_visible():
+            self._refs_overlay.set_margin_bottom(self._note_panel_height)
+        else:
+            self._refs_overlay.set_margin_bottom(0)
+
+    def _refresh_refs(self):
+        """Re-render the reference panel for the currently highlighted verse."""
+        if self._refs_overlay is None or not self._refs_overlay.get_visible():
+            return
+        for child in self._refs_body.get_children():
+            self._refs_body.remove(child)
+
+        chapter_refs = self._chapter_refs.get(self.chapter_index, {})
+        verse = getattr(self, "_current_verse", 0)
+
+        if verse:
+            self.refs_loc.set_text(f"v. {verse}")
+        else:
+            self.refs_loc.set_text("")
+
+        entries = []
+        if self._refs_pinned is not None:
+            entries = [self._refs_pinned]
+        elif verse:
+            entries = chapter_refs.get(verse, [])
+
+        if not entries:
+            placeholder = Gtk.Label(
+                label="No references for this verse."
+                if verse
+                else "Select a verse with j/k to see its references."
+            )
+            placeholder.get_style_context().add_class("progress-label")
+            placeholder.set_halign(Gtk.Align.START)
+            self._refs_body.pack_start(placeholder, False, False, 0)
+        else:
+            for e in entries:
+                card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+                card.get_style_context().add_class("ref-card")
+                label = e.get("label", "")
+                head = Gtk.Label(label=f"[{label}] " if label else "")
+                head.get_style_context().add_class("toc-current")
+                head.set_halign(Gtk.Align.START)
+                text = Gtk.Label(label=e.get("text", ""))
+                text.set_halign(Gtk.Align.START)
+                text.set_xalign(0.0)
+                text.set_line_wrap(True)
+                text.set_selectable(True)
+                if label:
+                    card.pack_start(head, False, False, 0)
+                card.pack_start(text, False, False, 0)
+                self._refs_body.pack_start(card, False, False, 0)
+
+        self._refs_overlay.show_all()
+        self._refs_overlay.set_visible(True)
+        self._position_refs_above_notes()
+
     def _apply_note_height(self, height):
         """Set the height of the notes panel and persist it to settings."""
         self._note_panel_height = int(height)
@@ -1312,6 +1469,7 @@ class OmarchyReader(Gtk.Application):
             self._notes_overlay.set_size_request(-1, self._note_panel_height)
         SETTINGS["note_panel_height"] = self._note_panel_height
         save_settings()
+        self._position_refs_above_notes()
 
     def _grow_note_height(self, amount=40):
         self._apply_note_height(self._note_panel_height + amount)
@@ -1465,12 +1623,14 @@ class OmarchyReader(Gtk.Application):
         # (space, letters, ...) are not stolen by the reader's page navigator.
         self._set_notes_zone("editor")
         self._panel_focus_state()
+        self._position_refs_above_notes()
 
     def _hide_notes(self):
         self._notes_overlay.set_visible(False)
         self._notes_overlay.get_style_context().remove_class("panel-focused")
         self._notes_overlay.get_style_context().remove_class("editor-active")
         self._notes_overlay.get_style_context().remove_class("list-active")
+        self._position_refs_above_notes()
         if self.webview and not self._on_home:
             self.webview.grab_focus()
         else:
@@ -1878,6 +2038,7 @@ class OmarchyReader(Gtk.Application):
         rows = [
             ("Ctrl + T", "Table of contents: books · chapters · verses (j/k, Enter, h/Back)"),
             ("Ctrl + N", "Notes panel (New button / Ctrl+Enter to add)"),
+            ("Ctrl + R", "Reference / commentary panel (shown above notes)"),
             ("Ctrl + h", "Jump to notes list (works while typing)"),
             ("Ctrl + l", "Add a note / edit the highlighted note"),
             ("Ctrl + j / k", "Notes list: move highlight · elsewhere: cycle sections"),
@@ -2027,6 +2188,24 @@ class OmarchyReader(Gtk.Application):
             .notes-scroller.zone-active {{
                 background-color: alpha({THEME["background"]}, 0.55);
                 border-color: alpha({THEME["accent"]}, 0.8);
+            }}
+            .refs-overlay {{
+                background-color: alpha({THEME["background"]}, 0.97);
+                border-top: 1px solid rgba(255,255,255,0.15);
+                border-bottom: 1px solid rgba(255,255,255,0.10);
+            }}
+            .refs-scroller {{
+                background-color: alpha({THEME["background"]}, 0.55);
+                border-radius: 8px;
+                border: 1px solid rgba(255,255,255,0.12);
+                padding: 4px;
+            }}
+            .ref-card {{
+                border-left: 3px solid alpha({THEME["accent"]}, 0.8);
+                padding: 2px 0 2px 10px;
+            }}
+            .ref-card label {{
+                color: {THEME["foreground"]};
             }}
             textview {{
                 color: {THEME["foreground"]};
@@ -2230,6 +2409,8 @@ class OmarchyReader(Gtk.Application):
         self._show_spinner(False)
         self.loading_box.set_visible(False)
         self._hide_notes()
+        if self._refs_overlay is not None:
+            self._refs_overlay.set_visible(False)
         self._hide_settings()
         self._hide_help()
         self._on_home = True
@@ -2379,50 +2560,56 @@ document.addEventListener('click', function (e) {{
             return
         path = dialog.get_filename()
         dialog.destroy()
-        if not path:
+        if not path or not os.path.isfile(path):
             return
-        try:
-            book = epub.read_epub(path)
-            docs = list(book.get_items_of_type(ebooklib.ITEM_DOCUMENT))
-            if not docs:
-                raise ValueError("No readable HTML documents found.")
+        name = os.path.basename(path)
+        # Show immediate feedback so the user knows something is happening,
+        # then do the heavy work (reading a large EPUB) off the UI thread.
+        self.show_welcome(f"Importing {name} — checking format…")
 
-            # Lightweight sanity check: look for verse-like markers in the first
-            # several documents. This avoids the heavy full parser instantiation
-            # during the import dialog.
-            verse_patterns = [
-                r'<sup[^>]*>\d+</sup>',
-                r'<span[^>]*class="[^"]*(?:versenum|verse-num|bold)[^"]*"[^>]*>[^<]*\d+',
-                r'<span[^>]*>[^<]*<[^>]*>\d+</[^>]*>[^<]*:\d+',
-                r'Chapter\s+\d+',
-            ]
-            verse_found = False
-            for doc in docs[:30]:
-                text = doc.get_content().decode("utf-8", "replace")[:20000]
-                if any(re.search(p, text, flags=re.I) for p in verse_patterns):
-                    verse_found = True
-                    break
-            if not verse_found:
-                raise ValueError(
-                    "No verse numbers or chapter markers found; "
-                    "this file may not be a Bible EPUB."
-                )
+        def worker():
+            try:
+                with zipfile.ZipFile(path) as zf:
+                    verse_found = False
+                    scanned = 0
+                    for entry in zf.namelist():
+                        if not entry.lower().endswith((".xhtml", ".html", ".htm")):
+                            continue
+                        try:
+                            text = zf.read(entry)[:30000].decode("utf-8", "replace")
+                        except Exception:
+                            continue
+                        scanned += 1
+                        if re.search(r"<sup[^>]*>\d+</sup>", text, flags=re.I):
+                            verse_found = True
+                            break
+                        if re.search(
+                            r'class="[^"]*(?:versenum|verse-num|bold)[^"]*"[^>]*>[^<]*\d',
+                            text,
+                            flags=re.I,
+                        ):
+                            verse_found = True
+                            break
+                        if scanned >= 40:
+                            break
+                if not verse_found:
+                    raise ValueError(
+                        "No verse numbers found; this file may not be a Bible EPUB."
+                    )
+                target = os.path.join(TRANSLATIONS_DIR, name)
+                if os.path.abspath(path) != os.path.abspath(target):
+                    shutil.copy2(path, target)
+                msg = f"Imported {name}. Select it above to open."
+            except Exception as e:
+                print(f"Import failed: {e}", file=sys.stderr)
+                msg = f"Import failed: {e}"
+            GLib.idle_add(self._import_done, msg)
 
-            target = os.path.join(TRANSLATIONS_DIR, os.path.basename(path))
-            if os.path.abspath(path) != os.path.abspath(target):
-                shutil.copy2(path, target)
-            name = html.escape(os.path.basename(path))
-            GLib.idle_add(
-                self.show_welcome,
-                f"Imported {name}. Select it above to open.",
-            )
-        except Exception as e:
-            msg = html.escape(str(e))
-            print(f"Import failed: {e}", file=sys.stderr)
-            GLib.idle_add(
-                self.show_welcome,
-                f"Import failed: {msg}",
-            )
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _import_done(self, msg):
+        self.show_welcome(msg)
+        return False
 
     def open_book(self, path, resume_index=None, resume_page_num=None):
         self._resume_index = resume_index
@@ -2570,7 +2757,7 @@ document.addEventListener('click', function (e) {{
         return result
 
     def _fill_verse_numbers(self, chapter_index):
-        """Populate the verse list for a chapter by reading its HTML."""
+        """Populate verse list and reference/commentary map for a chapter."""
         if chapter_index in self._chapter_verses:
             return
         if not 0 <= chapter_index < len(self.chapters):
@@ -2585,6 +2772,81 @@ document.addEventListener('click', function (e) {{
         body = self._annotate_verses(self._extract_body(content))
         numbers = sorted({int(n) for n in re.findall(r'data-vn="(\d+)"', body)})
         self._chapter_verses[chapter_index] = numbers
+        self._chapter_refs[chapter_index] = self._extract_refs(body, os.path.dirname(path))
+
+    def _extract_refs(self, body, chapter_dir):
+        """Build {verse_number: [{label, text}]} for footnote/commentary links.
+
+        Handles the common study-Bible marker styles: an <a> carrying an inline
+        title="..." note, an <a> linking to an id in the same chapter file, and
+        an <a> linking to an id in another extracted file (footnote appendix).
+        """
+        anchor_re = re.compile(
+            r'data-vn="(\d+)"|<a\b([^>]*?)>(.*?)</a>', re.I | re.S
+        )
+        id_re = re.compile(r'id="([^"]+)"', re.I)
+        refs = {}
+        current = None
+        target_cache = {}
+
+        def attr(attrs, name):
+            m = re.search(name + r'="([^"]*)"', attrs or "", re.I)
+            return m.group(1) if m else ""
+
+        def text_from(html, want_id):
+            m = id_re.search("id=\"" + re.escape(want_id) + "\"", html)
+            if not m:
+                return ""
+            seg = html[m.end():m.end() + 800]
+            close = re.search(r"</a>|<br\s*/?>", seg, re.I)
+            if close:
+                seg = seg[:close.start()]
+            text = re.sub(r"<[^>]+>", " ", seg)
+            return re.sub(r"\s+", " ", text).strip()
+
+        def resolve_text(href, title):
+            if title:
+                return title
+            if not href or href.startswith("http") or href.startswith("mailto"):
+                return ""
+            file_part, _, frag = href.partition("#")
+            if not frag:
+                return ""
+            if not file_part:
+                return text_from(body, frag)
+            # cross-file: look inside the extracted sibling file
+            fname = os.path.normpath(os.path.join(chapter_dir, file_part))
+            html = target_cache.get(fname)
+            if html is None:
+                try:
+                    with open(fname, "rb") as f:
+                        html = f.read().decode("utf-8", "replace")
+                except Exception:
+                    html = ""
+                target_cache[fname] = html
+            return text_from(html, frag)
+
+        for m in anchor_re.finditer(body):
+            if m.group(1) is not None:
+                current = int(m.group(1))
+                continue
+            attrs, inner = m.group(2), m.group(3)
+            label = re.sub(r"<[^>]+>", "", inner).strip()
+            title = attr(attrs, "title")
+            href = attr(attrs, "href")
+            if not label and not title and not href:
+                continue
+            # Only treat as a reference if it links somewhere or has a note.
+            if not title and not (href and "#" in href):
+                continue
+            if current is None:
+                continue
+            text = resolve_text(href, title)
+            if not text:
+                continue
+            refs.setdefault(current, []).append({"label": label, "text": text})
+        return refs
+
 
     def _flatten_toc(self):
         """Return a flat list of (title, href) from the book's TOC.
@@ -2831,6 +3093,8 @@ document.addEventListener('click', function (e) {{
 
         self._is_loading = True
         self._page_pages = 0
+        self._fill_verse_numbers(index)
+        self._refs_pinned = None
         self._show_spinner(True)
         self.webview.load_html(html, base_url)
         return False
@@ -2864,7 +3128,9 @@ document.addEventListener('click', function (e) {{
         elif mtype == "ready":
             self._is_loading = False
             self._current_verse = 0
+            self._refs_pinned = None
             self._update_verse_label()
+            self._refresh_refs()
             pages = data.get("pages", 0)
             self.loading_box.set_visible(False)
             self._show_spinner(False)
@@ -2902,7 +3168,16 @@ document.addEventListener('click', function (e) {{
                 self.next_chapter()
         elif mtype == "verse":
             self._current_verse = int(data.get("verse") or 0)
+            self._refs_pinned = None
             self._update_verse_label()
+            self._refresh_refs()
+        elif mtype == "ref":
+            self._refs_pinned = {
+                "label": data.get("label", ""),
+                "text": data.get("text", ""),
+            }
+            self._show_refs()
+            self._refresh_refs()
         elif mtype == "edge":
             if data.get("dir") == "next":
                 self.next_chapter()
@@ -2916,6 +3191,7 @@ document.addEventListener('click', function (e) {{
             self._show_progress(data.get("cur", 0) + 1)
             self._save_state()
             self._refresh_notes()
+            self._refresh_refs()
         elif mtype == "jserror":
             print("JS error:", data.get("msg"), file=sys.stderr)
 
@@ -3067,6 +3343,10 @@ document.addEventListener('click', function (e) {{
         # three sections (notes list -> add a note -> content); handled while
         # typing too.
         if ctrl:
+            if not shift and kn == "r":
+                # Ctrl+r toggles the reference/commentary panel.
+                self._toggle_refs()
+                return True
             if shift and kn == "k":
                 self._toggle_help()
                 return True
