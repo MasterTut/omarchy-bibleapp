@@ -142,6 +142,17 @@ def _ensure_data_dir():
     os.makedirs(DATA_DIR, exist_ok=True)
 
 
+def log_import(msg):
+    """Append a timestamped line to the import diagnostic log."""
+    try:
+        os.makedirs(DATA_DIR, exist_ok=True)
+        import datetime
+        with open(os.path.join(DATA_DIR, "import.log"), "a", encoding="utf-8") as fh:
+            fh.write(f"{datetime.datetime.now().isoformat()} {msg}\n")
+    except Exception:
+        pass
+
+
 def load_state():
     """Return the persisted reading state dict (book, chapter, page)."""
     try:
@@ -2460,7 +2471,7 @@ class OmarchyReader(Gtk.Application):
         if getattr(self, "_last_status", ""):
             status_html = f'<div class="home-status">{html.escape(self._last_status)}</div>'
 
-        html = f"""<!doctype html><html><head><meta charset="utf-8">
+        page_html = f"""<!doctype html><html><head><meta charset="utf-8">
 {self._styles()}
 <script>
 function post(msg) {{
@@ -2496,10 +2507,10 @@ document.addEventListener('click', function (e) {{
       <span class="book-name">Import EPUB</span>
     </a>
   </div>
-  <div class="home-footer">j/k select · Enter open · Ctrl+[ home · Ctrl+Shift+K keys</div>
-</div>
-</body></html>"""
-        self.webview.load_html(html, None)
+   <div class="home-footer">j/k select · Enter open · Ctrl+[ home · Ctrl+Shift+K keys</div>
+ </div>
+ </body></html>"""
+        self.webview.load_html(page_html, None)
 
     def show_loading(self, msg="Opening EPUB file"):
         # Native GTK overlay — no second load_html, so no blank-window race.
@@ -2538,33 +2549,51 @@ document.addEventListener('click', function (e) {{
 
     def _on_import_epub(self):
         """Let the user pick an EPUB and copy it into the translations folder."""
-        dialog = Gtk.FileChooserDialog(
-            title="Import EPUB into library",
-            transient_for=self.window,
-            action=Gtk.FileChooserAction.OPEN,
-        )
-        dialog.add_buttons(
-            Gtk.STOCK_CANCEL, Gtk.ResponseType.CANCEL,
-            "Import", Gtk.ResponseType.ACCEPT,
-        )
-        f = Gtk.FileFilter()
-        f.set_name("EPUB books (*.epub)")
-        f.add_pattern("*.epub")
-        dialog.add_filter(f)
-        dialog.connect("response", self._on_import_response)
-        dialog.show()
+        log_import("import requested; opening file chooser")
+        try:
+            dialog = Gtk.FileChooserDialog(
+                title="Import EPUB into library",
+                transient_for=self.window,
+                action=Gtk.FileChooserAction.OPEN,
+            )
+            dialog.add_buttons(
+                Gtk.STOCK_CANCEL, Gtk.ResponseType.CANCEL,
+                "Import", Gtk.ResponseType.ACCEPT,
+            )
+            f = Gtk.FileFilter()
+            f.set_name("EPUB books (*.epub)")
+            f.add_pattern("*.epub")
+            dialog.add_filter(f)
+            dialog.connect("response", self._on_import_response)
+            self._import_dialog = dialog
+            dialog.show()
+            log_import("file chooser shown")
+        except Exception as e:
+            log_import(f"failed to open chooser: {e!r}")
+            GLib.idle_add(self.show_welcome, f"Import failed to start: {e}")
 
     def _on_import_response(self, dialog, response):
+        log_import(f"response={int(response)} ACCEPT={int(Gtk.ResponseType.ACCEPT)}")
+        self._import_dialog = None
         if response != Gtk.ResponseType.ACCEPT:
             dialog.destroy()
             return
         path = dialog.get_filename()
+        log_import(f"selected path={path!r}")
         dialog.destroy()
         if not path or not os.path.isfile(path):
+            GLib.idle_add(
+                self.show_welcome,
+                "Import failed: no file was selected.",
+            )
             return
         name = os.path.basename(path)
-        # Show immediate feedback so the user knows something is happening,
-        # then do the heavy work (reading a large EPUB) off the UI thread.
+        # Defer the banner to the main loop: painting the webview from inside
+        # the response callback (which just destroyed a transient dialog) can
+        # silently no-op on some GTK/WebKit builds.
+        GLib.idle_add(self._start_import, path, name)
+
+    def _start_import(self, path, name):
         self.show_welcome(f"Importing {name} — checking format…")
 
         def worker():
@@ -2600,12 +2629,14 @@ document.addEventListener('click', function (e) {{
                 if os.path.abspath(path) != os.path.abspath(target):
                     shutil.copy2(path, target)
                 msg = f"Imported {name}. Select it above to open."
+                log_import(f"import OK: {msg}")
             except Exception as e:
-                print(f"Import failed: {e}", file=sys.stderr)
+                log_import(f"import error: {e!r}")
                 msg = f"Import failed: {e}"
             GLib.idle_add(self._import_done, msg)
 
         threading.Thread(target=worker, daemon=True).start()
+        return False
 
     def _import_done(self, msg):
         self.show_welcome(msg)
@@ -3124,6 +3155,7 @@ document.addEventListener('click', function (e) {{
         elif mtype == "continue_reading":
             self._continue_reading()
         elif mtype == "import_epub":
+            log_import("received import_epub message from webview")
             self._on_import_epub()
         elif mtype == "ready":
             self._is_loading = False
