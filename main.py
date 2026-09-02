@@ -9,10 +9,7 @@ import shlex
 import threading
 import zipfile
 import json
-import tomllib
-import tempfile
 import shutil
-import collections
 
 import gi
 
@@ -21,864 +18,43 @@ gi.require_version("WebKit2", "4.1")
 gi.require_version("GdkPixbuf", "2.0")
 
 from gi.repository import Gtk, Gio, GLib, Gdk, GdkPixbuf, WebKit2
-import ebooklib
-from ebooklib import epub
 
-APP_ID = "org.omarchy.Bible"
-
-# Where this project lives (used to locate bundled translations).
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-TRANSLATIONS_DIR = os.path.join(BASE_DIR, "translations")
-
-# User data dir for state + notes.
-DATA_DIR = os.path.expanduser("~/.config/omarchy-bible")
-STATE_PATH = os.path.join(DATA_DIR, "state.json")
-NOTES_PATH = os.path.join(DATA_DIR, "notes.json")
-SETTINGS_PATH = os.path.join(DATA_DIR, "settings.json")
-
-# Fallback palette (Ash) used when the live omarchy theme cannot be read.
-DEFAULT_THEME = {
-    "accent": "#626262",
-    "foreground": "#e0e0e0",
-    "background": "#121212",
-    "selection_foreground": "#121212",
-    "selection_background": "#e0e0e0",
-    "muted": "#b2b2b2",
-    "color11": "#b2b2b2",
-}
-
-THEME = dict(DEFAULT_THEME)
-
-# Path to the live omarchy theme palette (set by `omarchy theme set`).
-OMARCHY_STATE = os.path.expanduser("~/.local/state/omarchy")
-OMARCHY_CURRENT_THEME = os.path.join(OMARCHY_STATE, "current", "theme")
-OMARCHY_COLORS = os.path.join(OMARCHY_CURRENT_THEME, "colors.toml")
-
-
-def _parse_colors(text):
-    colors = {}
-    for line in text.splitlines():
-        m = re.match(r'\s*([\w-]+)\s*=\s*"(#[0-9a-fA-F]{3,8})"', line)
-        if m:
-            colors[m.group(1)] = m.group(2)
-    return colors
-
-
-def load_theme():
-    """Read the currently applied omarchy theme colors into the global THEME.
-
-    Falls back to the Ash palette when the live palette is missing.
-    """
-    target = {}
-    if os.path.isfile(OMARCHY_COLORS):
-        try:
-            with open(OMARCHY_COLORS, "r", encoding="utf-8") as fh:
-                colors = _parse_colors(fh.read())
-            if colors:
-                picked = {}
-                picked["background"] = colors.get("background")
-                picked["foreground"] = colors.get("foreground")
-                picked["accent"] = colors.get("accent")
-                picked["selection_background"] = colors.get("selection_background", colors.get("cursor"))
-                picked["selection_foreground"] = colors.get("selection_foreground", colors.get("background"))
-                picked["muted"] = colors.get("color11") or colors.get("color7")
-                picked["color11"] = picked["muted"]
-                target = {k: (v or DEFAULT_THEME[k]) for k, v in picked.items()}
-        except Exception:
-            target = dict(DEFAULT_THEME)
-    else:
-        target = dict(DEFAULT_THEME)
-    THEME.clear()
-    THEME.update(target)
-    return True
-
-
-# ~/.config/omarchy-bible/config.toml  (user-editable hotkeys)
-CONFIG_PATH = os.path.expanduser("~/.config/omarchy-bible/config.toml")
-
-DEFAULT_HOTKEYS = {
-    "font_increase": "Ctrl+equal",
-    "font_decrease": "Ctrl+minus",
-    "toc": "Ctrl+t",
-    "toggle_header": "Ctrl+Shift+h",
-    "toggle_reader_mode": "Ctrl+b",
-    "page_next": "Ctrl+Right",
-    "page_prev": "Ctrl+Left",
-    "note": "Ctrl+n",
-    "refs": "Ctrl+r",
-    "import": "Ctrl+i",
-    "home": "Ctrl+p",
-    "home_bracket": "Ctrl+bracketleft",
-    "settings": "Ctrl+s",
-    "cycle_section": "Ctrl+h/j/k/l",
-    "help": "Ctrl+Shift+k",
-}
-
-HOTKEYS = dict(DEFAULT_HOTKEYS)
-
-
-def load_config():
-    """Load user hotkeys from ~/.config/omarchy-reader/config.toml.
-
-    Only values actually provided in the file override the defaults, so a
-    partial config file is fine. Missing/invalid files keep the defaults.
-    """
-    global HOTKEYS
-    config = {}
-    if os.path.isfile(CONFIG_PATH):
-        try:
-            with open(CONFIG_PATH, "rb") as fh:
-                config = tomllib.load(fh)
-        except Exception:
-            config = {}
-    hotkeys = config.get("hotkeys", {}) if isinstance(config, dict) else {}
-    merged = dict(DEFAULT_HOTKEYS)
-    if isinstance(hotkeys, dict):
-        for key, value in hotkeys.items():
-            if isinstance(value, str) and value.strip():
-                merged[key] = value.strip()
-    HOTKEYS = merged
-    return True
-
-
-# ---------------- State & notes persistence ----------------
-
-def _ensure_data_dir():
-    os.makedirs(DATA_DIR, exist_ok=True)
-
-
-def log_import(msg):
-    """Append a timestamped line to the import diagnostic log."""
-    try:
-        os.makedirs(DATA_DIR, exist_ok=True)
-        import datetime
-        with open(os.path.join(DATA_DIR, "import.log"), "a", encoding="utf-8") as fh:
-            fh.write(f"{datetime.datetime.now().isoformat()} {msg}\n")
-    except Exception:
-        pass
-
-
-def load_state():
-    """Return the persisted reading state dict (book, chapter, page)."""
-    try:
-        with open(STATE_PATH, "r", encoding="utf-8") as fh:
-            data = json.load(fh)
-            if isinstance(data, dict):
-                return data
-    except Exception:
-        pass
-    return {}
-
-
-def save_state(state):
-    _ensure_data_dir()
-    try:
-        with open(STATE_PATH, "w", encoding="utf-8") as fh:
-            json.dump(state, fh, indent=2)
-    except Exception:
-        pass
-
-
-def load_notes():
-    """Return notes dict: {location_key: [note_entry, ...]}.
-
-    Each note entry is {"text": str, "ts": iso-timestamp}. Entries saved by
-    older versions as plain strings are migrated in place to this shape.
-    """
-    try:
-        with open(NOTES_PATH, "r", encoding="utf-8") as fh:
-            data = json.load(fh)
-            if not isinstance(data, dict):
-                return {}
-    except Exception:
-        return {}
-    for key in list(data.keys()):
-        items = data[key]
-        if not isinstance(items, list):
-            data[key] = []
-            continue
-        migrated = []
-        for it in items:
-            if isinstance(it, str):
-                migrated.append({"text": it, "ts": ""})
-            elif isinstance(it, dict):
-                migrated.append(
-                    {
-                        "text": str(it.get("text", "")),
-                        "ts": str(it.get("ts", "")),
-                        "verse": int(it.get("verse") or 0),
-                    }
-                )
-        data[key] = [n for n in migrated if n["text"].strip()]
-    return data
-
-
-def save_notes(notes):
-    _ensure_data_dir()
-    try:
-        with open(NOTES_PATH, "w", encoding="utf-8") as fh:
-            json.dump(notes, fh, indent=2)
-    except Exception:
-        pass
-
-
-# ---------------- Settings persistence ----------------
-
-DEFAULT_SETTINGS = {
-    "auto_hide_header": True,
-    "auto_hide_notes": True,
-    "note_panel_height": 300,
-}
-
-SETTINGS = dict(DEFAULT_SETTINGS)
-
-
-def load_settings():
-    """Load persisted app settings into the global SETTINGS dict.
-
-    Missing/partial files keep the defaults. JSON is used here for consistency
-    with the other persisted data files (state.json / notes.json).
-    """
-    data = {}
-    try:
-        with open(SETTINGS_PATH, "r", encoding="utf-8") as fh:
-            data = json.load(fh)
-            if not isinstance(data, dict):
-                data = {}
-    except Exception:
-        data = {}
-    merged = dict(DEFAULT_SETTINGS)
-    merged.update({k: v for k, v in data.items() if k in DEFAULT_SETTINGS})
-    SETTINGS.clear()
-    SETTINGS.update(merged)
-    return SETTINGS
-
-
-def save_settings():
-    _ensure_data_dir()
-    try:
-        with open(SETTINGS_PATH, "w", encoding="utf-8") as fh:
-            json.dump(SETTINGS, fh, indent=2)
-    except Exception:
-        pass
-
-
-def list_translations():
-    """Return a sorted list of EPUB filenames in the translations folder."""
-    if not os.path.isdir(TRANSLATIONS_DIR):
-        return []
-    return sorted(
-        f for f in os.listdir(TRANSLATIONS_DIR)
-        if f.lower().endswith(".epub")
-    )
-
-
-def _display_name(filename):
-    name = os.path.splitext(filename)[0]
-    # "ub-EASV" -> "EASV", "KJV.epub" -> "KJV"
-    name = name.split("-")[-1]
-    return name
-
-
-def current_theme_name():
-    try:
-        with open(os.path.join(OMARCHY_STATE, "current", "theme.name"), "r", encoding="utf-8") as fh:
-            return fh.read().strip()
-    except Exception:
-        return "Unknown"
-
-
-FONT_FAMILY = "JetBrainsMono Nerd Font"
-
-STYLESHEET = """
-<style>
-  html, body {{
-    margin: 0;
-    padding: 0;
-    background: {content_bg} !important;
-    color: {foreground} !important;
-    font-family: {font_family}, "JetBrains Mono", monospace;
-    font-size: {font_size}px;
-    line-height: 1.7;
-    overflow: hidden;
-    height: 100%;
-  }}
-  #container, .page, #source {{
-    background: {content_bg} !important;
-  }}
-  #container {{
-    color: {foreground} !important;
-  }}
-  #container p, #container span, #container li, #container td, #container div {{
-    color: {foreground} !important;
-  }}
-  body {{
-    box-sizing: border-box;
-    padding: 0 {side_padding}px;
-  }}
-  h1, h2, h3, h4, h5, h6 {{
-    color: {accent};
-    line-height: 1.3;
-    margin: 1.4em 0 0.6em;
-  }}
-  p {{ margin: 0 0 1.1em; }}
-  a {{ color: {foreground}; text-decoration: underline; }}
-  blockquote {{
-    border-left: 3px solid {accent};
-    margin: 1em 0;
-    padding-left: 1em;
-    color: {muted};
-  }}
-  img {{ max-width: 100%; height: auto; border-radius: 4px; }}
-  code {{
-    background: rgba(255,255,255,0.07);
-    padding: 0.15em 0.4em;
-    border-radius: 3px;
-    font-size: 0.9em;
-  }}
-  pre {{
-    background: rgba(255,255,255,0.05);
-    padding: 1em;
-    border-radius: 6px;
-    overflow-x: auto;
-    font-size: 0.9em;
-  }}
-  table {{ border-collapse: collapse; width: 100%; margin: 1em 0; }}
-  th, td {{
-    border: 1px solid rgba(255,255,255,0.15);
-    padding: 0.4em 0.6em;
-  }}
-  hr {{ border: none; border-top: 1px solid rgba(255,255,255,0.2); margin: 1.5em 0; }}
-  ::selection {{ background: {selection_background}; color: {selection_foreground}; }}
-
-  .page {{
-    position: absolute;
-    left: 0;
-    right: 0;
-    top: 0;
-    box-sizing: border-box;
-    padding: {top_padding}px {side_padding}px {bottom_padding}px;
-    opacity: 0;
-    transition: opacity 0.15s ease;
-  }}
-  .page.active {{ opacity: 1; }}
-  sup.v {{
-    color: {accent};
-    font-weight: bold;
-    font-size: 0.72em;
-    margin-right: 0.35em;
-  }}
-  span.v {{
-    color: {accent};
-    font-weight: bold;
-    margin-right: 0.15em;
-  }}
-  .verse-line {{
-    margin: 0.2em 0;
-    line-height: 1.55;
-  }}
-  .v-highlight {{
-    background: alpha({accent}, 0.55) !important;
-    color: {foreground} !important;
-    border-radius: 3px;
-    padding: 0 2px;
-  }}
-  .verse-glow {{
-    background: alpha({accent}, 0.10) !important;
-    border-left: 3px solid {accent};
-    padding-left: 0.6em;
-  }}
-  #container {{
-    position: absolute;
-    left: 0; right: 0; top: 0; bottom: 0;
-    overflow: hidden;
-  }}
-  #loading-overlay {{
-    position: fixed;
-    left: 0; right: 0; bottom: 0;
-    height: 3px;
-    z-index: 9999;
-    background: rgba(255,255,255,0.08);
-    overflow: hidden;
-  }}
-  #loading-overlay .bar {{
-    height: 100%;
-    width: 30%;
-    background: {accent};
-    animation: loading-slide 1.2s ease-in-out infinite;
-  }}
-  @keyframes loading-slide {{
-    0% {{ transform: translateX(-100%); }}
-    100% {{ transform: translateX(400%); }}
-  }}
-
-  /* ---- Home / library screen ---- */
-  body.home-body {{
-    overflow: auto;
-    padding: 0;
-    background: {content_bg} !important;
-  }}
-  .home {{
-    max-width: 760px;
-    margin: 0 auto;
-    padding: 56px {side_padding}px 80px;
-  }}
-  .home-title {{
-    font-size: {home_title_fs}px;
-    color: {accent};
-    font-weight: bold;
-    margin-bottom: 4px;
-  }}
-  .home-sub {{
-    color: {muted};
-    margin-bottom: 28px;
-  }}
-  .home-status {{
-    background: alpha({accent}, 0.12);
-    border: 1px solid {accent};
-    border-radius: 8px;
-    padding: 10px 14px;
-    color: {foreground};
-    margin-bottom: 20px;
-  }}
-  .section {{
-    margin-bottom: 30px;
-  }}
-  .section-title {{
-    font-size: {section_fs}px;
-    color: {muted};
-    text-transform: uppercase;
-    letter-spacing: 0.08em;
-    margin-bottom: 12px;
-    border-bottom: 1px solid rgba(255,255,255,0.12);
-    padding-bottom: 6px;
-  }}
-  .book-list {{
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-  }}
-  .book-item {{
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 14px 16px;
-    border: 1px solid rgba(255,255,255,0.12);
-    border-radius: 8px;
-    color: {foreground};
-    text-decoration: none;
-    background: rgba(255,255,255,0.02);
-    transition: background 0.15s ease, border-color 0.15s ease;
-  }}
-  .book-item:hover {{
-    background: alpha({accent}, 0.12);
-    border-color: {accent};
-  }}
-  .book-name {{
-    font-size: {item_fs}px;
-    font-weight: bold;
-  }}
-  .empty {{
-    color: {muted};
-    padding: 12px 2px;
-  }}
-  .continue {{
-    border: 1px solid rgba(255,255,255,0.12);
-    border-radius: 10px;
-    padding: 14px 16px;
-    background: alpha({accent}, 0.08);
-  }}
-  .continue .section-title {{
-    border-bottom: none;
-    margin-bottom: 6px;
-  }}
-  .continue-item {{
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    color: {foreground};
-    text-decoration: none;
-  }}
-  .cont-book {{
-    font-weight: bold;
-    font-size: {item_fs}px;
-  }}
-  .cont-pos {{
-    color: {muted};
-    font-size: 13px;
-  }}
-  .cont-arrow {{
-    margin-left: auto;
-    color: {accent};
-    font-size: 18px;
-  }}
-  .home-footer {{
-    margin-top: 34px;
-    color: {muted};
-    font-size: 12px;
-    opacity: 0.7;
-    text-align: center;
-  }}
-  .focused {{
-    outline: 2px solid {accent};
-    outline-offset: 2px;
-  }}
-</style>
-"""
-
-PAGE_JS = r"""
-var state = { pages: 0, current: 0, ready: false, reported: false };
-
-function post(msg) {
-  if (window.webkit && window.webkit.messageHandlers &&
-      window.webkit.messageHandlers.omarchy) {
-    try { window.webkit.messageHandlers.omarchy.postMessage(JSON.stringify(msg)); }
-    catch (e) {}
-  }
-}
-
-function nodeToHtml(node) {
-  if (node.nodeType === Node.TEXT_NODE) return node.nodeValue;
-  return node.outerHTML;
-}
-
-function paginate() {
-  var source = document.getElementById('source');
-  var container = document.getElementById('container');
-  if (!source || !container) return 0;
-
-  var viewport = document.documentElement.clientHeight;
-  var topPad = 60, bottomPad = 100, sidePad = 64;
-  var pageHeight = viewport - topPad - bottomPad;
-  if (pageHeight < 100) return 0;
-
-  var width = document.body.clientWidth - sidePad * 2;
-  if (width < 100) width = 600;
-
-  var nodes = Array.prototype.slice.call(source.childNodes);
-  var pieces = nodes.map(nodeToHtml).filter(function (s) { return s && s.trim(); });
-  if (pieces.length === 0) { state.pages = 0; state.ready = true; return 0; }
-
-  var probe = document.createElement('div');
-  probe.className = 'page';
-  probe.style.position = 'absolute';
-  probe.style.left = '-99999px';
-  probe.style.visibility = 'hidden';
-  probe.style.boxSizing = 'border-box';
-  probe.style.width = width + 'px';
-  probe.style.padding = topPad + 'px ' + sidePad + 'px ' + bottomPad + 'px';
-  document.body.appendChild(probe);
-
-  function measure(html) {
-    probe.innerHTML = html;
-    return probe.scrollHeight;
-  }
-
-  var pieceLens = pieces.map(function (s) {
-    var d = document.createElement('div');
-    d.innerHTML = s;
-    return d.textContent.length;
-  });
-
-  var pages = [];
-  var charStarts = [];
-  var block = '';
-  var blockLen = 0;
-  var total = 0;
-  for (var i = 0; i < pieces.length; i++) {
-    var candidate = block + pieces[i];
-    if (block && measure(candidate) > pageHeight) {
-      pages.push(block);
-      charStarts.push(total);
-      total += blockLen;
-      block = pieces[i];
-      blockLen = pieceLens[i];
-    } else {
-      block = candidate;
-      blockLen += pieceLens[i];
-    }
-  }
-  if (block) {
-    pages.push(block);
-    charStarts.push(total);
-  }
-  document.body.removeChild(probe);
-
-  state.charStarts = charStarts;
-  state.pages = pages.length;
-  state.verseStarts = [];
-  for (var p = 0; p < pages.length; p++) {
-    var m = pages[p].match(/data-vn="(\d+)"/);
-    state.verseStarts[p] = m ? parseInt(m[1], 10) : null;
-  }
-  container.innerHTML = '';
-  for (var p = 0; p < pages.length; p++) {
-    var div = document.createElement('div');
-    div.className = 'page' + (p === 0 ? ' active' : '');
-    div.innerHTML = pages[p];
-    container.appendChild(div);
-  }
-  state.current = 0;
-  state.ready = true;
-  window.scrollTo(0, 0);
-  return pages.length;
-}
-
-function currentCharStart(p) {
-  return (state.charStarts && state.charStarts[p] != null) ? state.charStarts[p] : 0;
-}
-
-function report() {
-  post({type:'ready', pages: state.pages, pch: currentCharStart(state.current)});
-}
-
-function currentPageIdx() { return state.current; }
-
-function clearVerseHighlight() {
-  var all = document.querySelectorAll('.verse-glow, .v-highlight');
-  for (var i = 0; i < all.length; i++) {
-    all[i].classList.remove('verse-glow');
-    all[i].classList.remove('v-highlight');
-  }
-}
-
-function resetVerseHighlight() {
-  clearVerseHighlight();
-  post({type:'verse', verse: 0});
-}
-
-function verseElems() {
-  var p = document.querySelector('.page.active');
-  if (!p) return [];
-  return Array.prototype.slice.call(p.querySelectorAll('sup.v, span.v'));
-}
-
-function currentVerseEl() {
-  var p = document.querySelector('.page.active');
-  if (!p) return null;
-  return p.querySelector('.v-highlight');
-}
-
-function applyVerseHighlight(el, vn) {
-  clearVerseHighlight();
-  if (!el) return;
-  el.classList.add('v-highlight');
-  var par = el.closest('p');
-  if (par) par.classList.add('verse-glow');
-  var page = el.closest('.page');
-  if (page && page.scrollHeight > page.clientHeight) {
-    page.scrollTop = Math.max(0, el.offsetTop - page.clientHeight * 0.35);
-  }
-  if (vn) post({type:'verse', verse: parseInt(vn, 10) || 0});
-}
-
-function moveVerse(delta) {
-  var els = verseElems();
-  if (els.length === 0) {
-    scrollContent(delta > 0 ? 70 : -70);
-    return false;
-  }
-  var cur = currentVerseEl();
-  var idx = 0;
-  if (cur) {
-    var found = Array.prototype.indexOf.call(els, cur);
-    if (found >= 0) idx = found + delta;
-  }
-  if (idx < 0) idx = 0;
-  if (idx >= els.length) idx = els.length - 1;
-  var el = els[idx];
-  applyVerseHighlight(el, el.getAttribute('data-vn'));
-  return true;
-}
-
-// Handle reader navigation directly in the page so it works even when the
-// GTK key-press-event path misses the event.
-document.addEventListener('keydown', function (e) {
-  var tag = e.target.tagName.toLowerCase();
-  if (tag === 'input' || tag === 'textarea' || tag === 'select') return;
-  if (e.ctrlKey || e.altKey || e.metaKey) return;
-  var key = e.key.toLowerCase();
-  if (key === 'j' || key === 'arrowdown') {
-    e.preventDefault();
-    moveVerse(1);
-    return;
-  }
-  if (key === 'k' || key === 'arrowup') {
-    e.preventDefault();
-    moveVerse(-1);
-    return;
-  }
-  if (key === 'l' || key === 'arrowright') {
-    e.preventDefault();
-    nextPage();
-    return;
-  }
-  if (key === 'h' || key === 'arrowleft') {
-    e.preventDefault();
-    prevPage();
-    return;
-  }
-});
-
-// Intercept clicks on reference/commentary markers (<a> with a title or an
-// in-book #fragment) and send the note text to the Python panel instead of
-// letting the webview navigate away.
-document.addEventListener('click', function (e) {
-  if (!e.target.closest) return;
-  var a = e.target.closest('a[href]');
-  if (!a) return;
-  var href = a.getAttribute('href') || '';
-  var title = a.getAttribute('title') || '';
-  if (!title && href.indexOf('#') === -1) return;
-  e.preventDefault();
-  var label = (a.textContent || '').trim();
-  var text = title;
-  if (!text && href.indexOf('#') !== -1) {
-    var frag = href.split('#').pop();
-    try { frag = decodeURIComponent(frag); } catch (err) {}
-    var t = document.getElementById(frag);
-    if (t) {
-      var box = t.closest ? (t.closest('p,li,div,blockquote') || t.parentNode) : t.parentNode;
-      text = ((box || t).textContent || '').trim();
-    }
-  }
-  post({type: 'ref', label: label, text: text});
-});
-
-function showPage(idx) {
-  if (!state.ready || state.pages === 0) return 0;
-  if (idx < 0) idx = 0;
-  if (idx >= state.pages) idx = state.pages - 1;
-  var pages = document.querySelectorAll('.page');
-  for (var i = 0; i < pages.length; i++) {
-    pages[i].className = i === idx ? 'page active' : 'page';
-  }
-  state.current = idx;
-  window.scrollTo(0, 0);
-  resetVerseHighlight();
-  post({type:'page', cur: idx, pages: state.pages, pch: currentCharStart(idx)});
-  return idx;
-}
-
-function scrollContent(delta) {
-  var el = document.querySelector('.page.active');
-  var cont = document.scrollingElement || document.documentElement;
-  if (el && el.scrollHeight > el.clientHeight) {
-    el.scrollTop += delta;
-  } else if (cont) {
-    cont.scrollTop += delta;
-  }
-}
-
-function goToVerse(vn) {
-  if (!state.ready || state.pages === 0) return false;
-  vn = parseInt(vn, 10) || 0;
-  if (vn <= 0) return false;
-  var starts = state.verseStarts || [];
-  var pageIdx = 0;
-  for (var i = 0; i < starts.length; i++) {
-    if (starts[i] != null && starts[i] <= vn) pageIdx = i;
-  }
-  var pages = document.querySelectorAll('.page');
-  if (pages.length === 0) return false;
-  for (var i = 0; i < pages.length; i++) {
-    pages[i].className = i === pageIdx ? 'page active' : 'page';
-  }
-  state.current = pageIdx;
-  window.scrollTo(0, 0);
-  post({type:'page', cur: pageIdx, pages: state.pages, pch: currentCharStart(pageIdx)});
-  var els = verseElems();
-  var found = null;
-  for (var i = 0; i < els.length; i++) {
-    if (parseInt(els[i].getAttribute('data-vn'), 10) === vn) {
-      found = els[i];
-      break;
-    }
-  }
-  if (found) {
-    applyVerseHighlight(found, vn);
-  } else {
-    clearVerseHighlight();
-    post({type:'verse', verse: 0});
-  }
-  return true;
-}
-
-function nextPage() {
-  if (!state.ready) return -2;
-  if (state.pages === 0) { post({type:'edge', dir:'next'}); return -1; }
-  if (state.current + 1 < state.pages) {
-    return showPage(state.current + 1);
-  }
-  post({type:'edge', dir:'next'});
-  return -1;
-}
-
-function prevPage() {
-  if (!state.ready) return -2;
-  if (state.pages === 0) { post({type:'edge', dir:'prev'}); return -1; }
-  if (state.current - 1 >= 0) {
-    return showPage(state.current - 1);
-  }
-  post({type:'edge', dir:'prev'});
-  return -1;
-}
-
-function gotoNextChapter() {
-  post({type:'edge', dir:'next'});
-}
-
-function gotoPrevChapter() {
-  post({type:'edge', dir:'prev'});
-}
-
-// Bootstrap: retry pagination until content lays out, then report exactly once.
-(function () {
-  var tries = 0, reported = false;
-  function attempt() {
-    if (reported) return;
-    var n = 0;
-    try { n = paginate(); } catch (e) { post({type:'jserror', msg: 'paginate: ' + e.message}); }
-    if (n > 0) { reported = true; report(); return; }
-    var src = document.getElementById('source');
-    var empty = !src || src.childNodes.length === 0 ||
-                (src.innerHTML && src.innerHTML.replace(/\s/g, '').length === 0);
-    if (empty || tries >= 30) { reported = true; report(); return; }
-    tries++;
-    setTimeout(attempt, 120);
-  }
-  window.addEventListener('load', function () { setTimeout(attempt, 120); });
-  window.addEventListener('resize', function () { setTimeout(attempt, 120); });
-})();
-"""
-
-JS_HANDLER = "omarchy"
+from reader_config import (
+    APP_ID, TRANSLATIONS_DIR, THEME, OMARCHY_STATE, HOTKEYS, SETTINGS,
+    load_theme, load_config, log_import, load_state, save_state,
+    load_notes, save_notes, load_settings, save_settings,
+    load_prayers, save_prayers, load_memory, save_memory,
+    list_translations, _display_name,
+)
+from reader_assets import FONT_FAMILY, STYLESHEET, PAGE_JS, JS_HANDLER
+from document import Document
+import personalspace
+import verse_ref
 
 
 class OmarchyReader(Gtk.Application):
     def __init__(self):
         super().__init__(application_id=APP_ID)
-        self.book = None
-        self.bookdir = None
         self.book_path = None
-        self.chapters = []
-        self._chapter_verses = {}
-        self._chapter_refs = {}
-        self._chapter_slice = {}
-        self._item_text_cache = {}
+        self.doc = None             # Document (EpubSource + reading state)
         self._refs_overlay = None
         self._refs_pinned = None
+        self._search_overlay = None
+        self._search_entry = None
+        self._search_list = None
+        self._search_results = []
+        self._search_alloc_height = 0
+        self._dock = None
+        self._mode_line = None
+        self._mode_chips = None
+        self._mode_hint = None
+        self._pending_verse = 0
         self._refs_panel_height = 240
+        self._search_panel_height = 300
         self._refs_tab = "notes"
         self._ref_tab_buttons = {}
-        self._book_res = {}
-        self.chapter_index = 0
-        self.current_page = 0
-        self.current_ch = 0
-        self.page_count = 0
         self.font_size = 18
         self.reading_mode = "dark"
-        self._toc_books = []
         self._toc_mode = "books"
         self._toc_book_idx = 0
         self._toc_chapter_idx = 0
@@ -890,16 +66,79 @@ class OmarchyReader(Gtk.Application):
         self._parent_monitor = None
         self._monitor_parent_path = None
         self.notes = {}
+        self.prayers = []
+        self.memory = []
         self._notes_overlay = None
         self._note_panel_height = 300
-        self._notes_zone = "editor"
-        self._note_card_rows = []
-        self._highlight_index = -1
+        self._ps_tab = "notes"
+        self._ps_editing = False     # False = navigate mode (keys act), True = typing
+        self._ps_tabs = {}
+        self._ps_stack = None
         self._active_section = "content"
-        self._current_verse = 0
+        self._focus = "content"      # routing truth: content | notes | refs
+        self._focus_label = None     # header focus badge
+        self._hint_label = None      # header contextual tip
         self._on_home = False
         self._home_options = []
         self._home_sel = 0
+
+    # ---- Reading-state properties backed by Document (single source of truth) ----
+    @property
+    def source(self):
+        return self.doc.source if self.doc else None
+
+    @property
+    def chapters(self):
+        return self.doc.chapters if self.doc else []
+
+    @property
+    def _toc_books(self):
+        return self.doc.books if self.doc else []
+
+    @property
+    def chapter_index(self):
+        return self.doc.chapter_index if self.doc else 0
+
+    @chapter_index.setter
+    def chapter_index(self, value):
+        if self.doc:
+            self.doc.chapter_index = value
+
+    @property
+    def current_page(self):
+        return self.doc.page if self.doc else 0
+
+    @current_page.setter
+    def current_page(self, value):
+        if self.doc:
+            self.doc.page = value
+
+    @property
+    def current_ch(self):
+        return self.doc.char_offset if self.doc else 0
+
+    @current_ch.setter
+    def current_ch(self, value):
+        if self.doc:
+            self.doc.char_offset = value
+
+    @property
+    def page_count(self):
+        return self.doc.pages if self.doc else 0
+
+    @page_count.setter
+    def page_count(self, value):
+        if self.doc:
+            self.doc.pages = value
+
+    @property
+    def _current_verse(self):
+        return self.doc.verse if self.doc else 0
+
+    @_current_verse.setter
+    def _current_verse(self, value):
+        if self.doc:
+            self.doc.verse = value
 
     def do_command_line(self, command_line):
         options = command_line.get_arguments()
@@ -917,6 +156,12 @@ class OmarchyReader(Gtk.Application):
         path = getattr(self, "cli_path", None)
         if path:
             self.open_book(path)
+
+    def do_shutdown(self):
+        if self.doc is not None:
+            self.doc.close()
+            self.doc = None
+        Gtk.Application.do_shutdown(self)
 
     def create_window(self):
         win = Gtk.ApplicationWindow(application=self)
@@ -937,9 +182,11 @@ class OmarchyReader(Gtk.Application):
         hb.set_show_close_button(True)
         hb.set_custom_title(self._title_label())
 
-        open_btn = Gtk.Button(label="Open Book")
-        open_btn.connect("clicked", self.on_open)
-        hb.pack_start(open_btn)
+        # Focus indicator lives where "Open Book" used to be (left side).
+        self._focus_label = Gtk.Label(label="")
+        self._focus_label.get_style_context().add_class("focus-badge")
+        self._focus_label.set_visible(False)
+        hb.pack_start(self._focus_label)
 
         self.progress_label = Gtk.Label(label="")
         self.progress_label.get_style_context().add_class("progress-label")
@@ -1008,14 +255,6 @@ class OmarchyReader(Gtk.Application):
         self._build_toc_overlay()
         self.loading_overlay_win.add_overlay(self.toc_overlay)
 
-        # Notes overlay (hidden until toggled).
-        self._build_notes_overlay()
-        self.loading_overlay_win.add_overlay(self._notes_overlay)
-
-        # References panel (study notes; hidden until Ctrl+R).
-        self._build_refs_overlay()
-        self.loading_overlay_win.add_overlay(self._refs_overlay)
-
         # Settings overlay (hidden until toggled).
         self._build_settings_overlay()
         self.loading_overlay_win.add_overlay(self._settings_overlay)
@@ -1024,9 +263,19 @@ class OmarchyReader(Gtk.Application):
         self._build_help_overlay()
         self.loading_overlay_win.add_overlay(self._help_overlay)
 
+        # Bottom dock holds the Personal Space, Resources and Search panels
+        # plus the always-visible mode line. Built as a single overlay child so
+        # GTK stacks them automatically (no manual margin math).
+        self._build_notes_overlay()
+        self._build_refs_overlay()
+        self._build_search_overlay()
+        self._build_dock()
+        self.loading_overlay_win.add_overlay(self._dock)
+
         self.window = win
         win.add(self.loading_overlay_win)
         win.connect("key-press-event", self.on_key_pressed_raw)
+        win.connect("set-focus", self._on_set_focus)
         self._load_notes_from_disk()
 
         self.show_welcome()
@@ -1039,9 +288,13 @@ class OmarchyReader(Gtk.Application):
         self._refs_overlay.set_visible(False)
         self._settings_overlay.set_visible(False)
         self._help_overlay.set_visible(False)
+        self._search_overlay.set_visible(False)
+        self._dock.set_visible(False)
         # Re-apply header visibility (show_all() blindly re-shows everything).
         if SETTINGS.get("auto_hide_header", True):
             self.headerbar.set_visible(False)
+
+        self._update_header_focus()
 
     def _build_toc_overlay(self):
         """Build the chapter-list overlay ("Table of Contents")."""
@@ -1137,7 +390,7 @@ class OmarchyReader(Gtk.Application):
             book = self._toc_books[self._toc_book_idx]
             chapter = book["chapters"][self._toc_chapter_idx]
             title = f"{book['title']} · {chapter['title']}"
-            verse_list = self._chapter_verses.get(chapter["index"], [])
+            verse_list = self.source.verses(chapter["index"]) if self.source else []
             items = [
                 (
                     f"Verse {vn}",
@@ -1181,11 +434,7 @@ class OmarchyReader(Gtk.Application):
 
     def _toc_locate_current_chapter(self):
         """Return (book_idx, chapter_in_book_idx) for the current chapter."""
-        for bi, book in enumerate(self._toc_books):
-            for ci, chapter in enumerate(book["chapters"]):
-                if chapter["index"] == self.chapter_index:
-                    return bi, ci
-        return 0, 0
+        return self.doc.locate() if self.doc else (0, 0)
 
     def _show_toc(self):
         if not self.chapters or not self._toc_books:
@@ -1208,8 +457,11 @@ class OmarchyReader(Gtk.Application):
 
     def _hide_toc(self):
         self.toc_overlay.set_visible(False)
+        if self._focus not in ("notes", "refs"):
+            self._focus = "content"
         if self.webview and not self._on_home:
             self.webview.grab_focus()
+        self._update_header_focus()
 
     def _toc_selected_index(self):
         row = self.toc_list.get_selected_row()
@@ -1286,7 +538,6 @@ class OmarchyReader(Gtk.Application):
             chapter_index = data.get("index", 0)
             self._toc_chapter_idx = data.get("chapter_in_book_idx", 0)
             self._do_load_chapter(chapter_index)
-            self._fill_verse_numbers(chapter_index)
             self._toc_mode = "verses"
             self._refresh_toc()
             if self._toc_rows:
@@ -1318,6 +569,107 @@ class OmarchyReader(Gtk.Application):
             return
         self._hide_toc()
 
+    # ---------------- Bottom dock + mode line ----------------
+    def _build_dock(self):
+        # One overlay child; GTK stacks its panels top-to-bottom and the mode
+        # line is always the bottom row.
+        self._dock = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        self._dock.set_halign(Gtk.Align.FILL)
+        self._dock.set_valign(Gtk.Align.END)
+        self._dock.set_visible(False)
+        self._dock.get_style_context().add_class("dock")
+        for panel in (self._refs_overlay, self._notes_overlay, self._search_overlay):
+            panel.set_hexpand(True)
+            self._dock.pack_start(panel, False, False, 0)
+        self._build_mode_line()
+
+    def _build_mode_line(self):
+        ml = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
+        ml.get_style_context().add_class("modeline")
+        self._mode_chips = {}
+        for key, label in (
+            ("content", " CONTENT "),
+            ("notes", " PERSONAL SPACE "),
+            ("refs", " RESOURCES "),
+        ):
+            lbl = Gtk.Label(label=label)
+            lbl.get_style_context().add_class("modeline-chip")
+            eb = Gtk.EventBox()
+            eb.add(lbl)
+            eb.connect("button-press-event", self._on_mode_chip, key)
+            ml.pack_start(eb, False, False, 0)
+            self._mode_chips[key] = lbl
+        sp = Gtk.Box()
+        sp.set_hexpand(True)
+        ml.pack_start(sp, True, True, 0)
+        self._mode_spinner = Gtk.Spinner()
+        self._mode_spinner.set_size_request(14, 14)
+        self._mode_spinner.set_visible(False)
+        ml.pack_end(self._mode_spinner, False, False, 0)
+        self._mode_status = Gtk.Label(label="")
+        self._mode_status.get_style_context().add_class("modeline-status")
+        ml.pack_end(self._mode_status, False, False, 0)
+        self._mode_hint = Gtk.Label(label="")
+        self._mode_hint.get_style_context().add_class("modeline-hint")
+        ml.pack_end(self._mode_hint, False, False, 0)
+        self._mode_line = ml
+        self._dock.pack_start(ml, False, False, 0)
+
+    def _on_mode_chip(self, widget, event, key):
+        if key == "content":
+            self._focus_content()
+        elif key == "notes":
+            if self._notes_overlay.get_visible():
+                self._focus_notes()
+            else:
+                self._show_notes()
+        elif key == "refs":
+            if self._refs_overlay.get_visible():
+                self._focus_refs()
+            else:
+                self._show_refs()
+        return True
+
+    def _set_section_frame(self, panel, active):
+        if panel is None:
+            return
+        ctx = panel.get_style_context()
+        if active:
+            ctx.add_class("section-active")
+        else:
+            ctx.remove_class("section-active")
+
+    def _update_mode_line(self):
+        if not hasattr(self, "_mode_chips") or self._mode_chips is None:
+            return
+        for key, lbl in self._mode_chips.items():
+            ctx = lbl.get_style_context()
+            if key == self._focus:
+                ctx.add_class("modeline-chip-active")
+            else:
+                ctx.remove_class("modeline-chip-active")
+        # Accent frame on the focused dock panel (none when focus is content).
+        self._set_section_frame(self._notes_overlay, self._focus == "notes")
+        self._set_section_frame(self._refs_overlay, self._focus == "refs")
+        self._set_section_frame(self._search_overlay, False)
+        if hasattr(self, "_mode_hint"):
+            self._mode_hint.set_text(self._context_hint())
+        if hasattr(self, "_mode_status"):
+            self._mode_status.set_text(self._status_text())
+
+    def _status_text(self):
+        home = getattr(self, "_on_home", False)
+        if home or not self.chapters:
+            return ""
+        title = self.chapters[self.chapter_index][1] if 0 <= self.chapter_index < len(self.chapters) else ""
+        text = title
+        if self._current_verse:
+            text += f":{self._current_verse}"
+        pages = getattr(self, "_page_pages", 0) or self.page_count
+        if pages:
+            text += f"   {self.current_page + 1}/{pages}"
+        return text
+
     # ---------------- Notes ----------------
     def _build_notes_overlay(self):
         """Build the page-specific notes panel (a strip along the bottom)."""
@@ -1333,10 +685,10 @@ class OmarchyReader(Gtk.Application):
         bar.set_margin_top(10)
         bar.set_margin_bottom(6)
 
-        self.notes_title = Gtk.Label(label="Personal Notes")
+        self.notes_title = Gtk.Label(label="Personal Space")
         self.notes_title.get_style_context().add_class("title-label")
         self.notes_title.set_halign(Gtk.Align.START)
-        bar.pack_start(self.notes_title, True, True, 0)
+        bar.pack_start(self.notes_title, False, False, 0)
 
         self.notes_loc = Gtk.Label(label="")
         self.notes_loc.get_style_context().add_class("progress-label")
@@ -1346,68 +698,126 @@ class OmarchyReader(Gtk.Application):
         close.connect("clicked", lambda *_: self._hide_notes())
         bar.pack_end(close, False, False, 0)
 
-        # Body: left = notes list, right = entry + add.
-        body = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
-        body.set_margin_start(16)
-        body.set_margin_end(16)
-        body.set_margin_bottom(12)
+        self._notes_overlay.pack_start(bar, False, False, 0)
 
-        self.notes_list = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
-        self.notes_scroller = scroller = Gtk.ScrolledWindow()
-        scroller.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
-        scroller.set_vexpand(True)
-        scroller.set_hexpand(True)
-        scroller.add(self.notes_list)
-        scroller.get_style_context().add_class("notes-scroller")
-        body.pack_start(scroller, True, True, 0)
+        # Tab bar: 1 Notes · 2 Prayer · 3 Memory.
+        tabbar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        tabbar.set_margin_start(16)
+        tabbar.set_margin_end(16)
+        tabbar.set_margin_bottom(8)
+        self._ps_tabs = {}
+        for key, label in (("notes", "1 Notes"), ("prayer", "2 Prayer"), ("memory", "3 Memory")):
+            b = Gtk.Button(label=label)
+            b.set_relief(Gtk.ReliefStyle.NONE)
+            b.connect("clicked", lambda _w, k=key: self._set_ps_tab(k))
+            tabbar.pack_start(b, False, False, 0)
+            self._ps_tabs[key] = b
+        self._notes_overlay.pack_start(tabbar, False, False, 0)
 
-        side = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
-        side.set_valign(Gtk.Align.FILL)
-        side.set_size_request(340, -1)
+        self._ps_stack = stack = Gtk.Stack()
+        stack.set_transition_type(Gtk.StackTransitionType.NONE)
+        stack.set_vexpand(True)
+        stack.set_hexpand(True)
 
-        self.notes_editor_box = side
-
-        # Verse reference label (shows the verse that will be saved with the
-        # note, or "General notes" when no verse is highlighted).
-        self.notes_verse_label = Gtk.Label(label="General notes")
+        # ---- Notes page (editor only, per verse) ----
+        note_page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        note_page.set_margin_start(16)
+        note_page.set_margin_end(16)
+        note_page.set_margin_bottom(12)
+        self.notes_verse_label = Gtk.Label(label="General note")
         self.notes_verse_label.get_style_context().add_class("progress-label")
         self.notes_verse_label.set_xalign(0.0)
-        side.pack_start(self.notes_verse_label, False, False, 0)
-
+        note_page.pack_start(self.notes_verse_label, False, False, 0)
         self.notes_textview = Gtk.TextView()
         self.notes_textview.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
         self.notes_textview.set_vexpand(True)
         self.notes_textview.connect("key-press-event", self._on_note_textview_key)
         self.notes_buffer = self.notes_textview.get_buffer()
-        side.pack_start(self.notes_textview, True, True, 0)
-
-        add_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-        new = Gtk.Button(label="New")
-        new.connect("clicked", self._on_note_new)
-        add_row.pack_start(new, False, False, 0)
+        note_page.pack_start(self.notes_textview, True, True, 0)
+        nrow = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
         add = Gtk.Button(label="Add")
         add.connect("clicked", self._on_note_add)
-        add_row.pack_start(add, False, False, 0)
+        nrow.pack_start(add, False, False, 0)
+        ndel = Gtk.Button(label="Delete")
+        ndel.connect("clicked", lambda *_: self._delete_current_note())
+        nrow.pack_start(ndel, False, False, 0)
+        nhint = Gtk.Label(label="Ctrl+Enter add \u00b7 Ctrl+J to content \u00b7 1-3 tabs")
+        nhint.get_style_context().add_class("progress-label")
+        nrow.pack_start(nhint, True, True, 0)
+        note_page.pack_start(nrow, False, False, 0)
+        stack.add_named(note_page, "notes")
 
-        hint = Gtk.Label(label="Ctrl+Enter save \u00b7 Ctrl+J to content \u00b7 Ctrl+N close")
-        hint.get_style_context().add_class("progress-label")
-        add_row.pack_start(hint, True, True, 0)
-        side.pack_start(add_row, False, False, 0)
+        # ---- Prayer page ----
+        prayer_page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        prayer_page.set_margin_start(16)
+        prayer_page.set_margin_end(16)
+        prayer_page.set_margin_bottom(12)
+        self.prayer_list = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        pscroller = Gtk.ScrolledWindow()
+        pscroller.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
+        pscroller.set_vexpand(True)
+        pscroller.add(self.prayer_list)
+        prayer_page.pack_start(pscroller, True, True, 0)
+        prow = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        self.prayer_entry = Gtk.Entry()
+        self.prayer_entry.set_placeholder_text("New prayer request\u2026")
+        self.prayer_entry.connect("activate", lambda *_: self._prayer_add())
+        prow.pack_start(self.prayer_entry, True, True, 0)
+        self.prayer_freq = Gtk.ComboBoxText()
+        for f in ("daily", "weekly", "monthly"):
+            self.prayer_freq.append_text(f.capitalize())
+        self.prayer_freq.set_active(0)
+        prow.pack_start(self.prayer_freq, False, False, 0)
+        padd = Gtk.Button(label="Add")
+        padd.connect("clicked", lambda *_: self._prayer_add())
+        prow.pack_start(padd, False, False, 0)
+        prayer_page.pack_start(prow, False, False, 0)
+        stack.add_named(prayer_page, "prayer")
 
-        body.pack_start(side, False, False, 0)
+        # ---- Memory page ----
+        memory_page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        memory_page.set_margin_start(16)
+        memory_page.set_margin_end(16)
+        memory_page.set_margin_bottom(12)
+        self.memory_list = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        mscroller = Gtk.ScrolledWindow()
+        mscroller.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
+        mscroller.set_vexpand(True)
+        mscroller.add(self.memory_list)
+        memory_page.pack_start(mscroller, True, True, 0)
+        mrow = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        madd = Gtk.Button(label="Add current verse")
+        madd.connect("clicked", lambda *_: self._memory_add_current())
+        mrow.pack_start(madd, False, False, 0)
+        self.memory_hide_btn = Gtk.ToggleButton(label="Hide text")
+        self.memory_hide_btn.connect("toggled", lambda *_: self._refresh_memory())
+        mrow.pack_start(self.memory_hide_btn, False, False, 0)
+        mhint = Gtk.Label(label="Follows you across books \u00b7 Space toggles")
+        mhint.get_style_context().add_class("progress-label")
+        mrow.pack_start(mhint, True, True, 0)
+        memory_page.pack_start(mrow, False, False, 0)
+        stack.add_named(memory_page, "memory")
 
-        self._notes_overlay.pack_start(bar, False, False, 0)
-        self._notes_overlay.pack_start(body, True, True, 0)
+        self._notes_overlay.pack_start(stack, True, True, 0)
+        self._ps_tab = "notes"
         self._apply_note_height(SETTINGS.get("note_panel_height", 300))
 
     def _build_refs_overlay(self):
         """Build the tabbed Resources panel (a strip above the notes)."""
-        self._refs_overlay = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        # EventBox gives the panel a real GdkWindow so a click anywhere in it
+        # focuses it (its label children are windowless and would not).
+        self._refs_overlay = Gtk.EventBox()
         self._refs_overlay.set_visible(False)
         self._refs_overlay.set_halign(Gtk.Align.FILL)
         self._refs_overlay.set_valign(Gtk.Align.END)
         self._refs_overlay.set_size_request(-1, self._refs_panel_height)
         self._refs_overlay.get_style_context().add_class("refs-overlay")
+        self._refs_overlay.connect(
+            "button-press-event", lambda *_: self._focus_refs()
+        )
+        self._refs_inner = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        self._refs_overlay.add(self._refs_inner)
+        outer = self._refs_inner
 
         bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
         bar.set_margin_start(16)
@@ -1428,7 +838,7 @@ class OmarchyReader(Gtk.Application):
         close.connect("clicked", lambda *_: self._hide_refs())
         bar.pack_end(close, False, False, 0)
 
-        self._refs_overlay.pack_start(bar, False, False, 0)
+        outer.pack_start(bar, False, False, 0)
 
         # Tab bar: Notes · Cross-refs · Introduction · Images · Links.
         tabs = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
@@ -1448,7 +858,7 @@ class OmarchyReader(Gtk.Application):
             btn.connect("clicked", lambda _b, k=key: self._set_ref_tab(k))
             tabs.pack_start(btn, False, False, 0)
             self._ref_tab_buttons[key] = btn
-        self._refs_overlay.pack_start(tabs, False, False, 0)
+        outer.pack_start(tabs, False, False, 0)
 
         self._refs_body = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
         self._refs_body.set_margin_start(16)
@@ -1462,7 +872,7 @@ class OmarchyReader(Gtk.Application):
         scroller.add(self._refs_body)
         scroller.get_style_context().add_class("refs-scroller")
 
-        self._refs_overlay.pack_start(scroller, True, True, 0)
+        outer.pack_start(scroller, True, True, 0)
 
     def _set_ref_tab(self, key):
         if key not in self._ref_tab_buttons:
@@ -1503,45 +913,86 @@ class OmarchyReader(Gtk.Application):
 
     def _focus_refs(self):
         self._active_section = "refs"
+        self._focus = "refs"
         if self._refs_scroller is not None:
             self._refs_scroller.grab_focus()
+        self._update_header_focus()
         return False
 
     def _focus_content(self):
         self._active_section = "content"
+        self._focus = "content"
         if self.webview:
             self.webview.grab_focus()
         self._notes_lose_focus_appearance()
+        self._update_header_focus()
         return False
 
     def _focus_notes(self):
         if not self._notes_overlay.get_visible():
             self._show_notes()
+        else:
+            self._set_ps_tab(getattr(self, "_ps_tab", "notes"))
         self._active_section = "notes"
-        self._set_notes_zone("editor")
+        self._focus = "notes"
+        self._update_header_focus()
         return False
 
     def _focus_next(self, forward=True):
-        """Move keyboard focus between content, personal notes, and resources."""
-        order = ["content", "notes"]
+        """Move focus among the content and any *currently open* panels.
+
+        Never auto-opens a panel: if only the reading content is present this is
+        a no-op. Ctrl+j / Ctrl+k therefore just walk content -> notes -> resources
+        (skipping whichever are closed) and back.
+        """
+        order = ["content"]
+        if self._notes_overlay.get_visible():
+            order.append("notes")
         if self._refs_overlay is not None and self._refs_overlay.get_visible():
             order.append("refs")
-        if self._focus_in_refs():
-            cur = "refs"
-        elif self._focus_in_text_input() or self._notes_overlay.get_visible():
-            cur = "notes"
-        else:
-            cur = "content"
-        idx = order.index(cur) if cur in order else 0
+        if len(order) <= 1:
+            self._update_header_focus()
+            return
+        cur = self._focus if self._focus in order else "content"
+        idx = order.index(cur)
         nxt = order[(idx + (1 if forward else -1)) % len(order)]
         if nxt == "content":
             self._focus_content()
         elif nxt == "notes":
             self._focus_notes()
         else:
-            if not self._refs_overlay.get_visible():
-                self._show_refs()
             self._focus_refs()
+
+    def _on_set_focus(self, window, widget):
+        """Keep self._focus in sync with real keyboard focus (incl. mouse clicks).
+
+        Whichever panel contains the newly-focused widget becomes the routing
+        target, so tab-switch keys and reader navigation stay correct after a
+        click just as they do after Ctrl+J/K.
+        """
+        if widget is None:
+            return
+        notes = getattr(self, "_notes_overlay", None)
+        refs = getattr(self, "_refs_overlay", None)
+        w = widget
+        while w is not None:
+            if w is refs:
+                self._focus = "refs"
+                self._update_header_focus()
+                return
+            if w is notes:
+                self._focus = "notes"
+                # Editing iff a text field (not the tab button) has focus.
+                self._ps_editing = widget in (
+                    getattr(self, "notes_textview", None),
+                    getattr(self, "prayer_entry", None),
+                )
+                self._update_header_focus()
+                return
+            w = w.get_parent()
+        if widget is self.webview:
+            self._focus = "content"
+            self._update_header_focus()
 
     def _scroll_refs(self, delta, big=False):
         if self._refs_scroller is None:
@@ -1565,8 +1016,12 @@ class OmarchyReader(Gtk.Application):
     def _hide_refs(self):
         if self._refs_overlay is not None:
             self._refs_overlay.set_visible(False)
+        if self._focus == "refs":
+            self._focus = "content"
+            self._active_section = "content"
         if self.webview and not self._on_home:
             self.webview.grab_focus()
+        self._update_header_focus()
 
     def _toggle_refs(self):
         if self._refs_overlay is not None and self._refs_overlay.get_visible():
@@ -1574,14 +1029,18 @@ class OmarchyReader(Gtk.Application):
         else:
             self._show_refs()
 
+    def _position_bottom_panels(self):
+        """Layout is now handled by the dock box; just refresh the focus chrome."""
+        self._update_mode_line()
+
+    def _on_search_alloc(self, widget, alloc):
+        # Search hugs its content; nothing else needs re-stacking because the
+        # dock lays panels out automatically. Keep the hook cheap.
+        self._update_mode_line()
+
     def _position_refs_above_notes(self):
-        """Stack the refs panel directly above the notes strip when both are open."""
-        if self._refs_overlay is None:
-            return
-        if self._notes_overlay is not None and self._notes_overlay.get_visible():
-            self._refs_overlay.set_margin_bottom(self._note_panel_height)
-        else:
-            self._refs_overlay.set_margin_bottom(0)
+        # Back-compatible alias; kept so existing call sites still work.
+        self._update_mode_line()
 
     def _ref_placeholder(self, text):
         lbl = Gtk.Label(label=text)
@@ -1621,8 +1080,6 @@ class OmarchyReader(Gtk.Application):
         """Re-render the Resources panel for the current tab + verse."""
         if self._refs_overlay is None or not self._refs_overlay.get_visible():
             return
-        if self.chapter_index not in self._chapter_refs:
-            self._ensure_chapter_refs(self.chapter_index)
         for child in self._refs_body.get_children():
             self._refs_body.remove(child)
 
@@ -1634,9 +1091,9 @@ class OmarchyReader(Gtk.Application):
             self.refs_loc.set_text(f"{book_name} · v. {verse}" if verse else book_name)
             if self._refs_pinned is not None and tab == "notes":
                 entries = [self._refs_pinned]
-            elif verse:
+            elif verse and self.source:
                 want = "crossrefs" if tab == "crossrefs" else "notes"
-                allrefs = self._chapter_refs.get(self.chapter_index, {})
+                allrefs = self.source.refs(self.chapter_index)
                 entries = [e for e in allrefs.get(verse, []) if e.get("kind", "notes") == want]
             else:
                 entries = []
@@ -1648,7 +1105,7 @@ class OmarchyReader(Gtk.Application):
                 for e in entries:
                     self._ref_card(e.get("label", ""), e.get("text", ""))
         else:
-            intro, images, links = self._get_book_resources(self.chapter_index)
+            intro, images, links = self.source.resources(self.chapter_index) if self.source else ("", [], [])
             self.refs_loc.set_text(book_name)
             if tab == "intro":
                 if intro.strip():
@@ -1717,39 +1174,27 @@ class OmarchyReader(Gtk.Application):
         self._apply_refs_height(max(140, self._refs_panel_height - amount))
 
     def _notes_lose_focus_appearance(self):
-        """Make the notes panel look unfocused without hiding it."""
-        self._notes_zone = "editor"
-        overlay = self._notes_overlay.get_style_context()
-        overlay.remove_class("panel-focused")
-        overlay.remove_class("editor-active")
-        overlay.remove_class("list-active")
-        scroller = self.notes_scroller.get_style_context()
-        scroller.remove_class("zone-active")
-        editor = self.notes_editor_box.get_style_context()
-        editor.remove_class("zone-active")
+        """Make the Personal Space panel look unfocused without hiding it."""
+        self._notes_overlay.get_style_context().remove_class("panel-focused")
+
+    def _edit_from_list(self):
+        """Ctrl+l: open Personal Space on the Notes tab for the current verse."""
+        if not SETTINGS.get("show_personal_space", True):
+            return
+        self._active_section = "notes"
+        self._show_notes()
+        self._set_ps_tab("notes")
 
     def _set_section(self, section):
-        """Set the active section: \"list\", \"editor\", or \"content\".
-
-        This controls both focus and which keys navigate. Section changes in
-        the order list -> editor -> content (cycling).
-        """
+        """Set the active focus section: "notes" (Personal Space) or "content"."""
         if not self.book_path or not self.chapters:
             return
-        if section == "list":
-            self._editing_note = None
+        if section == "notes":
+            self._focus = "notes"
             self._active_section = "notes"
             self._show_notes()
-            if self._note_card_rows:
-                self._set_notes_zone("list")
-            else:
-                self._set_notes_zone("editor")
-        elif section == "editor":
-            self._active_section = "notes"
-            self._show_notes()
-            self._set_notes_zone("editor")
         elif section == "content":
-            self._editing_note = None
+            self._focus = "content"
             self._active_section = "content"
             self._notes_lose_focus_appearance()
             if self.webview:
@@ -1757,15 +1202,7 @@ class OmarchyReader(Gtk.Application):
             else:
                 self.window.grab_focus()
             self._panel_focus_state()
-
-    def _cycle_section(self):
-        """Cycle to the next section: notes list -> add a note -> content."""
-        if self._active_section == "content":
-            self._set_section("list")
-        elif self._notes_zone == "list":
-            self._set_section("editor")
-        else:
-            self._set_section("content")
+            self._update_header_focus()
 
     def _home_apply_highlight(self):
         """Visual feedback for the home-screen j/k selection."""
@@ -1824,7 +1261,7 @@ class OmarchyReader(Gtk.Application):
         self._run_js(f"moveVerse({delta});")
 
     def _panel_focus_state(self):
-        focused = self._notes_zone == "list" or self._focus_in_text_input()
+        focused = self._focus_in_text_input()
         ov = self._notes_overlay.get_style_context()
         if focused:
             ov.add_class("panel-focused")
@@ -1834,248 +1271,160 @@ class OmarchyReader(Gtk.Application):
 
     def _load_notes_from_disk(self):
         self.notes = load_notes()
+        self.prayers = load_prayers()
+        self.memory = load_memory()
 
     def _write_notes(self):
         save_notes(self.notes)
 
     def _note_key(self):
-        """Stable location key for the current book/chapter.
+        return self.doc.note_key() if self.doc else None
 
-        Uses the character offset into the chapter where the current page
-        starts (reported by the paginator), so notes stay anchored to the
-        text rather than to a page number that shifts with window size.
-        """
-        if not self.book_path or not self.chapters:
+    def _verse_note_key(self):
+        """Per-verse note key for the currently highlighted verse."""
+        if not self.doc:
             return None
-        book = os.path.basename(self.book_path)
-        return f"{book}|{self.chapter_index}|{self.current_ch}"
-
-    def _legacy_note_keys(self):
-        """Older notes.json entries anchored by page number instead of char."""
-        if not self.book_path or not self.chapters:
-            return []
-        book = os.path.basename(self.book_path)
-        return [f"{book}|{self.chapter_index}|{self.current_page}"]
+        return personalspace.note_key(
+            self.doc.book_name, self.doc.chapter_index, self._current_verse
+        )
 
     def _note_location_label(self):
-        book = os.path.basename(self.book_path) if self.book_path else ""
-        name = _display_name(book) if book else ""
-        return f"{name} · ch {self.chapter_index + 1} · page {self.current_page + 1}"
+        if not self.doc:
+            return ""
+        book = _display_name(self.doc.book_name) if self.doc.book_name else ""
+        base = f"{book} · ch {self.chapter_index + 1}"
+        if self._current_verse:
+            base += f" · v. {self._current_verse}"
+        return base
 
     def _toggle_notes(self):
+        if not SETTINGS.get("show_personal_space", True):
+            return
         if self._notes_overlay.get_visible():
             self._hide_notes()
         else:
             self._show_notes()
 
     def _show_notes(self):
+        if not SETTINGS.get("show_personal_space", True):
+            return
         if not self.book_path or not self.chapters:
             return
         self._hide_toc()
         self._hide_settings()
         self._hide_help()
         self._notes_overlay.set_visible(True)
-        self._refresh_notes()
         self._notes_overlay.show_all()
-        self._update_verse_label()
-        # Focus the editor so typing a note works immediately and plain keys
-        # (space, letters, ...) are not stolen by the reader's page navigator.
-        self._set_notes_zone("editor")
+        self._set_ps_tab(getattr(self, "_ps_tab", "notes"))
         self._panel_focus_state()
         self._position_refs_above_notes()
+        self._focus = "notes"
+        self._active_section = "notes"
+        self._update_header_focus()
 
     def _hide_notes(self):
         self._notes_overlay.set_visible(False)
         self._notes_overlay.get_style_context().remove_class("panel-focused")
-        self._notes_overlay.get_style_context().remove_class("editor-active")
-        self._notes_overlay.get_style_context().remove_class("list-active")
+        self._ps_editing = False
         self._position_refs_above_notes()
+        if self._focus == "notes":
+            self._focus = "content"
+            self._active_section = "content"
         if self.webview and not self._on_home:
             self.webview.grab_focus()
         else:
             self.window.grab_focus()
+        self._update_header_focus()
+
+    # ---------------- Personal Space tabs ----------------
+    def _set_ps_tab(self, key, edit=False):
+        if key not in self._ps_tabs:
+            return
+        self._ps_tab = key
+        self._ps_stack.set_visible_child_name(key)
+        for k, b in self._ps_tabs.items():
+            ctx = b.get_style_context()
+            if k == key:
+                ctx.add_class("tab-active")
+            else:
+                ctx.remove_class("tab-active")
+        if key == "notes":
+            self._load_verse_note()
+        elif key == "prayer":
+            self._refresh_prayer()
+        elif key == "memory":
+            self._refresh_memory()
+        # Focus model: by default we focus the tab BUTTON (navigate mode) so
+        # 1/2/3, Tab and i work. Only in "edit" mode do we move focus into the
+        # text field (so typing goes there instead of switching tabs).
+        field = self._ps_text_field(key)
+        if edit and field is not None:
+            field.grab_focus()
+        else:
+            self._ps_tabs[key].grab_focus()
+
+    def _ps_text_field(self, key):
+        if key == "notes":
+            return self.notes_textview
+        if key == "prayer":
+            return self.prayer_entry
+        return None  # memory has no text field
+
+    def _enter_ps_edit(self):
+        field = self._ps_text_field(self._ps_tab)
+        if field is not None:
+            field.grab_focus()
+            self._ps_editing = True
+            self._update_header_focus()
+            return True
+        return False
+
+    def _exit_ps_edit(self):
+        self._ps_editing = False
+        btn = self._ps_tabs.get(self._ps_tab)
+        if btn is not None:
+            btn.grab_focus()
+        self._update_header_focus()
+
+    def _cycle_ps_tab(self, delta):
+        order = list(self._ps_tabs.keys())
+        if not order:
+            return
+        idx = order.index(self._ps_tab) if self._ps_tab in order else 0
+        self._set_ps_tab(order[(idx + delta) % len(order)], edit=self._ps_editing)
 
     def _refresh_notes(self):
-        """Rebuild the notes list for the current page."""
-        if not hasattr(self, "notes_list") or self._notes_overlay is None:
+        """Refresh whichever Personal Space tab is currently active."""
+        if self._notes_overlay is None or not self._notes_overlay.get_visible():
             return
-        if not self._notes_overlay.get_visible():
-            return
-        key = self._note_key()
         self.notes_loc.set_text(self._note_location_label())
-        for child in self.notes_list.get_children():
-            self.notes_list.remove(child)
-        self._note_card_rows = []
-        self._highlight_index = -1
-
-        if key is None:
-            empty = Gtk.Label(label="No page selected.")
-            empty.get_style_context().add_class("progress-label")
-            self.notes_list.pack_start(empty, False, False, 0)
-            return
-
-        # Merge the char-anchored key with any legacy page-anchored keys, but
-        # dedupe: on page 1 the char offset is 0 so _note_key() already equals
-        # the legacy page key — adding both would show every note twice.
-        keys = []
-        for k in [key] + self._legacy_note_keys():
-            if k and k not in keys:
-                keys.append(k)
-        notes = []
-        for k in keys:
-            notes.extend(self.notes.get(k, []))
-        if not notes:
-            empty = Gtk.Label(label="No notes for this page.")
-            empty.get_style_context().add_class("progress-label")
-            self.notes_list.pack_start(empty, False, False, 0)
-            return
-
-        for idx, note in enumerate(notes):
-            row = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
-            row.get_style_context().add_class("note-card")
-            self._note_card_rows.append(row)
-            row.connect("button-press-event", lambda *_, i=idx: self._on_card_clicked(i))
-
-            ntext = note.get("text", note) if isinstance(note, dict) else note
-            nts = note.get("ts") if isinstance(note, dict) else ""
-            nverse = note.get("verse", 0) if isinstance(note, dict) else 0
-
-            text = Gtk.Label(label=str(ntext))
-            text.set_xalign(0.0)
-            text.set_line_wrap(True)
-            text.set_halign(Gtk.Align.START)
-            row.pack_start(text, False, False, 0)
-
-            meta = nts
-            if nverse:
-                meta = f"{meta} \u00b7 v. {nverse}" if meta else f"v. {nverse}"
-            else:
-                meta = f"{meta} \u00b7 General notes" if meta else "General notes"
-            if meta:
-                ts = Gtk.Label(label=meta)
-                ts.get_style_context().add_class("progress-label")
-                ts.set_xalign(0.0)
-                ts.set_halign(Gtk.Align.START)
-                row.pack_start(ts, False, False, 0)
-
-            del_btn = Gtk.Button(label="Delete")
-            del_btn.set_halign(Gtk.Align.END)
-            del_btn.connect("clicked", lambda *_, k=key, i=idx: self._delete_note(k, i))
-            row.pack_end(del_btn, False, False, 0)
-
-            self.notes_list.pack_start(row, False, False, 0)
-
-        self.notes_list.show_all()
-
-    def _on_card_clicked(self, index):
-        if 0 <= index < len(self._note_card_rows):
-            self._highlight_index = index
-            self._apply_highlight()
-            if self._notes_zone != "list":
-                self._set_notes_zone("list")
-        return True
-
-    def _set_notes_zone(self, zone):
-        """Switch keyboard focus between the notes editor and the notes list."""
-        self._notes_zone = zone
-        overlay = self._notes_overlay.get_style_context()
-        overlay.remove_class("editor-active")
-        overlay.remove_class("list-active")
-        ov = self._notes_overlay.get_style_context()
-        scroller = self.notes_scroller.get_style_context()
-        editor = self.notes_editor_box.get_style_context()
-        if zone == "editor":
-            ov.add_class("editor-active")
-            editor.add_class("zone-active")
-            scroller.remove_class("zone-active")
-            self.notes_textview.grab_focus()
+        tab = getattr(self, "_ps_tab", "notes")
+        if tab == "notes":
+            self._load_verse_note()
+        elif tab == "prayer":
+            self._refresh_prayer()
         else:
-            ov.add_class("list-active")
-            scroller.add_class("zone-active")
-            editor.remove_class("zone-active")
-            if self._note_card_rows:
-                if self._highlight_index < 0:
-                    self._highlight_index = 0
-                self._apply_highlight()
-                self.notes_scroller.grab_focus()
-            else:
-                self.notes_textview.grab_focus()
-                self._notes_zone = "editor"
-                self._set_notes_zone("editor")
-                return
-        self._panel_focus_state()
+            self._refresh_memory()
 
-    def _apply_highlight(self):
-        """Visually highlight the currently selected note card."""
-        for i, row in enumerate(self._note_card_rows):
-            if i == self._highlight_index:
-                row.get_style_context().add_class("selected")
-            else:
-                row.get_style_context().remove_class("selected")
-
-    def _move_highlight(self, delta):
-        if not self._note_card_rows:
+    def _load_verse_note(self):
+        key = self._verse_note_key()
+        self._update_verse_label()
+        if key is None:
             return
-        n = len(self._note_card_rows)
-        self._highlight_index = (self._highlight_index + delta) % n
-        self._apply_highlight()
-        row = self._note_card_rows[self._highlight_index]
-        if hasattr(self, "notes_scroller") and self.notes_scroller.get_vadjustment() is not None:
-            adj = self.notes_scroller.get_vadjustment()
-            lo, hi = row.get_allocation().y, row.get_allocation().y + row.get_allocation().height
-            if adj:
-                adj.set_value(min(max(lo, adj.get_value()), max(0, hi - adj.get_page_size())))
-            self.notes_scroller.queue_draw()
+        lst = self.notes.get(key) or []
+        text = ""
+        if lst:
+            first = lst[0]
+            text = first.get("text", "") if isinstance(first, dict) else str(first)
+        s, e = self.notes_buffer.get_bounds()
+        if self.notes_buffer.get_text(s, e, False) != text:
+            self.notes_buffer.set_text(text)
 
-    def _highlight_note_key_index(self):
-        """Map the highlighted row to (key, index) in self.notes, or (None, None).
-
-        The on-screen list merges the char-anchored key with any legacy page
-        keys, so walk those lists in the same order to find the real location.
-        """
-        if self._highlight_index < 0 or not self._note_card_rows:
-            return None, None
-        key = self._note_key()
-        if not key:
-            return None, None
-        keys = []
-        for k in [key] + self._legacy_note_keys():
-            if k and k not in keys:
-                keys.append(k)
-        idx = self._highlight_index
-        for k in keys:
-            lst = self.notes.get(k)
-            if lst is None:
-                continue
-            if idx < len(lst):
-                return k, idx
-            idx -= len(lst)
-        return None, None
-
-    def _edit_from_list(self):
-        """Ctrl+l: load the highlighted note into the add-note editor for
-        editing, or open a fresh editor when nothing is highlighted."""
-        self._editing_note = None
-        key, idx = self._highlight_note_key_index()
-        if key is not None and idx is not None:
-            lst = self.notes.get(key)
-            if lst and 0 <= idx < len(lst):
-                self._editing_note = {"key": key, "idx": idx}
-                entry = lst[idx]
-                text = str(entry.get("text", "")) if isinstance(entry, dict) else str(entry)
-                self.notes_buffer.set_text(text)
-                end = self.notes_buffer.get_end_iter()
-                self.notes_buffer.place_cursor(end)
-        self._set_section("editor")
-
-    def _delete_highlighted(self):
-        key, idx = self._highlight_note_key_index()
-        if key is None or idx is None:
-            return
-        lst = self.notes.get(key)
-        if lst and 0 <= idx < len(lst):
-            self._delete_note(key, idx)
-            self._move_highlight(0)
+    def _update_verse_label(self):
+        if self._current_verse:
+            self.notes_verse_label.set_text(f"Verse {self._current_verse}")
+        else:
+            self.notes_verse_label.set_text("Chapter note (no verse selected)")
 
     def _on_note_textview_key(self, widget, event):
         ctrl = bool(event.state & Gdk.ModifierType.CONTROL_MASK)
@@ -2083,7 +1432,7 @@ class OmarchyReader(Gtk.Application):
             self._add_note()
             return True
         # The text view would otherwise eat Ctrl+J / Ctrl+K (line feed), so
-        # route those to section focus-cycling here.
+        # route those to panel focus-cycling here.
         if ctrl and event.keyval in (Gdk.KEY_j, Gdk.KEY_k):
             self._focus_next(forward=(event.keyval == Gdk.KEY_j))
             return True
@@ -2092,62 +1441,142 @@ class OmarchyReader(Gtk.Application):
     def _on_note_add(self, button):
         self._add_note()
 
-    def _on_note_new(self, button):
-        self._editing_note = None
-        self.notes_buffer.set_text("")
-        self.notes_textview.grab_focus()
-
-    def _update_verse_label(self):
-        if self._current_verse:
-            self.notes_verse_label.set_text(f"Verse {self._current_verse}")
-        else:
-            self.notes_verse_label.set_text("General notes")
-
     def _add_note(self):
-        start, end = self.notes_buffer.get_bounds()
-        text = self.notes_buffer.get_text(start, end, False).strip()
-        self.notes_buffer.set_text("")
-        if not text:
-            return
-        key = self._note_key()
+        key = self._verse_note_key()
         if key is None:
             return
+        s, e = self.notes_buffer.get_bounds()
+        text = self.notes_buffer.get_text(s, e, False).strip()
         from datetime import datetime
-
-        # Editing an existing note loaded via Ctrl+l: update it in place.
-        edit = self._editing_note
-        self._editing_note = None
-        if edit:
-            lst = self.notes.get(edit.get("key"))
-            idx = edit.get("idx")
-            if lst and 0 <= idx < len(lst):
-                lst[idx]["text"] = text
-                lst[idx]["verse"] = self._current_verse or 0
-                self._write_notes()
-                self._refresh_notes()
-                return
-            # The original note is gone (deleted/navigated away): fall
-            # through and save a fresh note rather than dropping the text.
-
-        entry = {
-            "text": text,
-            "ts": datetime.now().strftime("%Y-%m-%d %H:%M"),
-            "verse": self._current_verse or 0,
-        }
-        self.notes.setdefault(key, []).append(entry)
-        self._write_notes()
-        self._refresh_notes()
-
-    def _delete_note(self, key, index):
-        notes = self.notes.get(key)
-        if not notes or index >= len(notes):
-            return
-        del notes[index]
-        if not notes:
+        if not text:
             self.notes.pop(key, None)
+        else:
+            self.notes[key] = [{
+                "text": text,
+                "ts": datetime.now().strftime("%Y-%m-%d %H:%M"),
+                "verse": self._current_verse or 0,
+            }]
         self._write_notes()
-        self._refresh_notes()
+        self._update_verse_label()
 
+    def _delete_current_note(self):
+        key = self._verse_note_key()
+        if key is not None:
+            self.notes.pop(key, None)
+            self._write_notes()
+        self.notes_buffer.set_text("")
+
+    # ---------------- Prayer requests ----------------
+    def _prayer_add(self):
+        text = self.prayer_entry.get_text().strip()
+        if not text:
+            return
+        freq = (self.prayer_freq.get_active_text() or "Daily").lower()
+        self.prayers = personalspace.add_prayer(self.prayers, text, freq)
+        save_prayers(self.prayers)
+        self.prayer_entry.set_text("")
+        self._refresh_prayer()
+
+    def _prayer_toggle(self, pid):
+        self.prayers = personalspace.toggle_prayer(self.prayers, pid)
+        save_prayers(self.prayers)
+        self._refresh_prayer()
+
+    def _prayer_remove(self, pid):
+        self.prayers = personalspace.remove_prayer(self.prayers, pid)
+        save_prayers(self.prayers)
+        self._refresh_prayer()
+
+    def _refresh_prayer(self):
+        if not hasattr(self, "prayer_list"):
+            return
+        for c in self.prayer_list.get_children():
+            self.prayer_list.remove(c)
+        if not self.prayers:
+            lbl = Gtk.Label(label="No prayer requests yet. Add one below.")
+            lbl.get_style_context().add_class("progress-label")
+            lbl.set_halign(Gtk.Align.START)
+            self.prayer_list.pack_start(lbl, False, False, 0)
+        for p in self.prayers:
+            pending = personalspace.is_pending(p)
+            row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+            chk = Gtk.CheckButton()
+            chk.set_active(not pending)
+            chk.connect("toggled", lambda _w, pid=p["id"]: self._prayer_toggle(pid))
+            row.pack_start(chk, False, False, 0)
+            label = Gtk.Label(label=f"{p['text']}  [{p.get('freq', 'daily')}]")
+            label.set_xalign(0.0)
+            label.set_line_wrap(True)
+            label.set_hexpand(True)
+            if not pending:
+                label.get_style_context().add_class("progress-label")
+            row.pack_start(label, True, True, 0)
+            rm = Gtk.Button(label="Delete")
+            rm.set_relief(Gtk.ReliefStyle.NONE)
+            rm.connect("clicked", lambda _w, pid=p["id"]: self._prayer_remove(pid))
+            row.pack_start(rm, False, False, 0)
+            self.prayer_list.pack_start(row, False, False, 0)
+        self.prayer_list.show_all()
+
+    # ---------------- Memorization ----------------
+    def _memory_add_current(self):
+        if not self.doc:
+            return
+        self._run_js(
+            "post({type:'memory_capture', verse: currentVerseNum(),"
+            " text: currentVerseText()});"
+        )
+
+    def _memory_add(self, verse, text):
+        if not self.doc:
+            return
+        book = _display_name(self.doc.book_name) if self.doc.book_name else self.doc.book_name
+        self.memory, _ = personalspace.add_memory(
+            self.memory, book, self.chapter_index + 1, verse or 1, text or ""
+        )
+        save_memory(self.memory)
+        self._refresh_memory()
+
+    def _memory_toggle(self, key):
+        self.memory = personalspace.toggle_memory(self.memory, key)
+        save_memory(self.memory)
+        self._refresh_memory()
+
+    def _memory_remove(self, key):
+        self.memory = personalspace.remove_memory(self.memory, key)
+        save_memory(self.memory)
+        self._refresh_memory()
+
+    def _refresh_memory(self):
+        if not hasattr(self, "memory_list"):
+            return
+        for c in self.memory_list.get_children():
+            self.memory_list.remove(c)
+        hide = self.memory_hide_btn.get_active() if hasattr(self, "memory_hide_btn") else False
+        if not self.memory:
+            lbl = Gtk.Label(label="No verses yet. Highlight one and 'Add current verse'.")
+            lbl.get_style_context().add_class("progress-label")
+            lbl.set_halign(Gtk.Align.START)
+            self.memory_list.pack_start(lbl, False, False, 0)
+        for m in self.memory:
+            box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+            hrow = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+            chk = Gtk.CheckButton(label=f"{m.get('book', '')} {m.get('chapter', 0)}:{m.get('verse', 0)}")
+            chk.set_active(m.get("done", False))
+            chk.connect("toggled", lambda _w, k=m["key"]: self._memory_toggle(k))
+            hrow.pack_start(chk, True, True, 0)
+            rm = Gtk.Button(label="Delete")
+            rm.set_relief(Gtk.ReliefStyle.NONE)
+            rm.connect("clicked", lambda _w, k=m["key"]: self._memory_remove(k))
+            hrow.pack_start(rm, False, False, 0)
+            box.pack_start(hrow, False, False, 0)
+            txt = Gtk.Label(label="(hidden)" if hide else m.get("text", ""))
+            txt.set_xalign(0.0)
+            txt.set_line_wrap(True)
+            txt.get_style_context().add_class("progress-label")
+            box.pack_start(txt, False, False, 0)
+            self.memory_list.pack_start(box, False, False, 0)
+        self.memory_list.show_all()
     # ---------------- Settings ----------------
     def _build_settings_overlay(self):
         """Build the settings panel (opened with Ctrl+S)."""
@@ -2204,46 +1633,43 @@ class OmarchyReader(Gtk.Application):
         self._settings_overlay.pack_start(bar, False, False, 0)
         self._settings_overlay.pack_start(row, False, False, 0)
 
-        # Auto-hide notes.
-        row2 = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
-        row2.set_margin_start(16)
-        row2.set_margin_end(16)
-        row2.set_margin_top(8)
-        row2.set_margin_bottom(8)
+        row3 = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        row3.set_margin_start(16)
+        row3.set_margin_end(16)
+        row3.set_margin_top(8)
+        row3.set_margin_bottom(8)
 
-        label_box2 = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
-        lbl2 = Gtk.Label(label="Auto-hide notes")
-        lbl2.set_xalign(0.0)
-        lbl2.set_halign(Gtk.Align.START)
-        label_box2.pack_start(lbl2, False, False, 0)
-
-        sub2 = Gtk.Label(
-            label="Hide the notes panel until Ctrl+N, or always keep it open."
+        label_box3 = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        lbl3 = Gtk.Label(label="Show Personal Space")
+        lbl3.set_xalign(0.0)
+        lbl3.set_halign(Gtk.Align.START)
+        label_box3.pack_start(lbl3, False, False, 0)
+        sub3 = Gtk.Label(
+            label="Notes, Prayer Requests and Memorization (Ctrl+P). "
+            "Turn off to hide the feature entirely."
         )
-        sub2.get_style_context().add_class("progress-label")
-        sub2.set_xalign(0.0)
-        sub2.set_halign(Gtk.Align.START)
-        sub2.set_line_wrap(True)
-        label_box2.pack_start(sub2, False, False, 0)
+        sub3.get_style_context().add_class("progress-label")
+        sub3.set_xalign(0.0)
+        sub3.set_halign(Gtk.Align.START)
+        sub3.set_line_wrap(True)
+        label_box3.pack_start(sub3, False, False, 0)
 
-        switch2 = Gtk.Switch()
-        switch2.set_active(SETTINGS.get("auto_hide_notes", True))
-        switch2.set_halign(Gtk.Align.END)
-        switch2.set_valign(Gtk.Align.CENTER)
-        switch2.connect("state-set", self._on_auto_hide_notes_toggled)
-        self._auto_hide_notes_switch = switch2
+        switch3 = Gtk.Switch()
+        switch3.set_active(SETTINGS.get("show_personal_space", True))
+        switch3.set_halign(Gtk.Align.END)
+        switch3.set_valign(Gtk.Align.CENTER)
+        switch3.connect("state-set", self._on_show_personal_space_toggled)
+        self._show_ps_switch = switch3
 
-        row2.pack_start(label_box2, True, True, 0)
-        row2.pack_start(switch2, False, False, 0)
+        row3.pack_start(label_box3, True, True, 0)
+        row3.pack_start(switch3, False, False, 0)
 
-        self._settings_overlay.pack_start(row2, False, False, 0)
+        self._settings_overlay.pack_start(row3, False, False, 0)
 
-    def _on_auto_hide_notes_toggled(self, switch, active):
-        SETTINGS["auto_hide_notes"] = bool(active)
+    def _on_show_personal_space_toggled(self, switch, active):
+        SETTINGS["show_personal_space"] = bool(active)
         save_settings()
-        if not active:
-            self._show_notes()
-        else:
+        if not active and self._notes_overlay is not None:
             self._hide_notes()
         return False
 
@@ -2268,7 +1694,6 @@ class OmarchyReader(Gtk.Application):
         self._settings_overlay.show_all()
         self._settings_overlay.set_visible(True)
         self._auto_hide_switch.set_active(SETTINGS.get("auto_hide_header", True))
-        self._auto_hide_notes_switch.set_active(SETTINGS.get("auto_hide_notes", True))
 
     def _hide_settings(self):
         self._settings_overlay.set_visible(False)
@@ -2300,25 +1725,25 @@ class OmarchyReader(Gtk.Application):
 
         rows = [
             ("Ctrl + T", "Table of contents: books · chapters · verses (j/k, Enter, h/Back)"),
-            ("Ctrl + N", "Personal Notes panel (New button / Ctrl+Enter to add)"),
+            ("Ctrl + P", "Personal Space: Notes · Prayer · Memory (tabs 1-3)"),
+            ("/", "Search a book or passage (e.g. John 3:16) · Enter jumps there"),
             ("Ctrl + R", "Resources panel: Notes · Cross-refs · Intro · Images · Links"),
-            ("1 – 5", "Switch the Resources panel tab (when open)"),
-            ("Ctrl + j / k", "Move focus: content ⇄ personal notes ⇄ resources"),
+            ("1 – 3 / 1 – 5", "Switch tabs in the focused panel (Personal Space / Resources)"),
+            ("Ctrl + j / k", "Move focus: content ⇄ personal space ⇄ resources"),
             ("j / k (resources)", "Scroll the Resources panel · h / l switch tabs"),
-            ("Ctrl + h", "Jump to notes list (works while typing)"),
-            ("Ctrl + l", "Add a note / edit the highlighted note"),
+            ("Ctrl + h / l", "Focus the Personal Space notes editor"),
             ("Ctrl + Shift + H", "Toggle header bar"),
             ("Ctrl + S", "Settings"),
             ("Ctrl + Shift + K", "Keybindings reference"),
-            ("Ctrl + [ / Ctrl + P", "Home / choose a translation"),
+            ("Ctrl + [", "Home / choose a translation"),
             ("Ctrl + B", "Toggle reader mode"),
             ("Ctrl + I", "Import an EPUB into the library"),
             ("Ctrl + O", "Open a book file (in the reader)"),
             ("H / L / ← / →", "Previous / next page (left / right)"),
             ("J / K / ↑ / ↓", "Notes highlighted: move up / down · content: step verses (j/↓ down, k/↑ up)"),
             ("Home: j/k, i, x", "Move selection · i imports · x removes a translation"),
-            ("x", "Delete the highlighted note (or, on Home, the translation)"),
-            ("Ctrl + Shift + +/-", "Grow / shrink the notes or references panel"),
+            ("x (Home)", "Delete the highlighted translation"),
+            ("Ctrl + Shift + +/-", "Grow / shrink the focused panel (Personal Space / Resources)"),
             ("Ctrl + Right / Ctrl + Left", "Traverse chapters"),
         ]
         lines = "\n".join(
@@ -2352,6 +1777,137 @@ class OmarchyReader(Gtk.Application):
     def _hide_help(self):
         self._help_overlay.set_visible(False)
 
+    # ---------------- Search ("Go to passage") ----------------
+    def _build_search_overlay(self):
+        # A bottom bar: the input sits at the very bottom and the suggestion
+        # list grows upward above it.
+        self._search_overlay = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        self._search_overlay.set_visible(False)
+        self._search_overlay.set_halign(Gtk.Align.FILL)
+        self._search_overlay.set_valign(Gtk.Align.END)
+        self._search_overlay.get_style_context().add_class("search-overlay")
+        # Track the bar's real (content-hugging) height so panels above it stack.
+        self._search_overlay.connect("size-allocate", self._on_search_alloc)
+
+        self._search_list = Gtk.ListBox()
+        self._search_list.set_selection_mode(Gtk.SelectionMode.SINGLE)
+        self._search_list.connect("row-activated", self._on_search_row_activated)
+        list_scroll = Gtk.ScrolledWindow()
+        list_scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        # Hug the content: grow with the number of results, up to a cap, then scroll.
+        list_scroll.set_propagate_natural_height(True)
+        list_scroll.set_max_content_height(300)
+        list_scroll.add(self._search_list)
+        self._search_overlay.pack_start(list_scroll, False, False, 0)
+
+        # Input row (bottom of the bar).
+        row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        row.set_margin_start(16)
+        row.set_margin_end(16)
+        row.set_margin_top(6)
+        row.set_margin_bottom(8)
+        prefix = Gtk.Label(label="⌕")
+        prefix.get_style_context().add_class("title-label")
+        row.pack_start(prefix, False, False, 0)
+        self._search_entry = Gtk.Entry()
+        self._search_entry.set_placeholder_text("Go to…  e.g. John 3:16, ps 23, Genesis")
+        self._search_entry.set_has_frame(False)
+        self._search_entry.connect("changed", self._on_search_changed)
+        self._search_entry.connect("key-press-event", self._on_search_key)
+        row.pack_start(self._search_entry, True, True, 0)
+        hint = Gtk.Label(label="↑/↓ select · Enter go · Esc close")
+        hint.get_style_context().add_class("progress-label")
+        row.pack_start(hint, False, False, 0)
+        self._search_overlay.pack_start(row, False, False, 0)
+
+    def _open_search(self):
+        if not self.book_path or not self.chapters:
+            return
+        self._hide_settings()
+        self._hide_help()
+        self._search_overlay.show_all()
+        self._search_overlay.set_visible(True)
+        self._position_bottom_panels()
+        self._search_entry.set_text("")
+        self._run_search("")
+        self._search_entry.grab_focus()
+        self._search_entry.select_region(0, 0)
+
+    def _close_search(self):
+        if self._search_overlay is not None:
+            self._search_overlay.set_visible(False)
+            self._position_bottom_panels()
+
+    def _run_search(self, text):
+        for r in self._search_list.get_children():
+            self._search_list.remove(r)
+        if not self.doc:
+            self._search_results = []
+            return
+        results = verse_ref.search(self.doc.books, text, limit=30)
+        self._search_results = results
+        for res in results:
+            row = Gtk.ListBoxRow()
+            lbl = Gtk.Label(label=res["label"])
+            lbl.set_xalign(0.0)
+            lbl.set_margin_start(10)
+            lbl.set_margin_top(4)
+            lbl.set_margin_bottom(4)
+            row.add(lbl)
+            row._search_data = res
+            self._search_list.add(row)
+        self._search_list.show_all()
+        first = self._search_list.get_row_at_index(0)
+        if first is not None:
+            self._search_list.select_row(first)
+
+    def _on_search_changed(self, entry):
+        self._run_search(entry.get_text())
+
+    def _on_search_key(self, widget, event):
+        kv = event.keyval
+        if kv == Gdk.KEY_Escape:
+            self._close_search()
+            self._focus_content()
+            return True
+        if kv in (Gdk.KEY_Down, Gdk.KEY_Up):
+            self._search_select_offset(1 if kv == Gdk.KEY_Down else -1)
+            return True
+        if kv in (Gdk.KEY_Return, Gdk.KEY_KP_Enter):
+            row = self._search_list.get_selected_row()
+            if row is not None:
+                self._search_goto(getattr(row, "_search_data", None))
+            return True
+        return False
+
+    def _search_select_offset(self, delta):
+        count = len(self._search_results)
+        if count == 0:
+            return
+        cur = self._search_list.get_selected_row()
+        idx = self._search_list.get_row_index(cur) if cur else 0
+        idx = max(0, min(count - 1, idx + delta))
+        row = self._search_list.get_row_at_index(idx)
+        if row is not None:
+            self._search_list.select_row(row)
+            self._search_list.scroll_to(row)
+
+    def _on_search_row_activated(self, listbox, row):
+        self._search_goto(getattr(row, "_search_data", None))
+
+    def _search_goto(self, data):
+        if not data or not self.doc:
+            return
+        idx = data.get("chapter_index")
+        verse = data.get("verse") or 0
+        if idx is None:
+            return
+        self._close_search()
+        self._pending_verse = verse
+        self._focus = "content"
+        self._do_load_chapter(idx)
+        self._focus_content()
+
     def _apply_theme_css(self):
         css = f"""
             window {{
@@ -2371,6 +1927,14 @@ class OmarchyReader(Gtk.Application):
                 color: {THEME["muted"]};
                 font-size: 13px;
                 margin-right: 8px;
+            }}
+            .focus-badge {{
+                color: {THEME["background"]};
+                background-color: {THEME["accent"]};
+                border-radius: 10px;
+                padding: 1px 8px;
+                font-size: 12px;
+                font-weight: bold;
             }}
             button {{
                 color: {THEME["foreground"]};
@@ -2416,6 +1980,44 @@ class OmarchyReader(Gtk.Application):
             }}
             .toc-overlay row:selected .toc-current {{
                 color: {THEME["background"]};
+            }}
+            .dock {{
+                background-color: alpha({THEME["background"]}, 0.99);
+                border-top: 1px solid rgba(255,255,255,0.15);
+            }}
+            .modeline {{
+                background-color: {THEME["background"]};
+                border-top: 1px solid rgba(255,255,255,0.10);
+            }}
+            .modeline-chip {{
+                color: {THEME["muted"]};
+                padding: 4px 10px;
+                font-size: 12px;
+                font-weight: bold;
+            }}
+            .modeline-chip:hover {{
+                color: {THEME["foreground"]};
+            }}
+            .modeline-chip-active {{
+                background-color: {THEME["accent"]};
+                color: {THEME["background"]};
+            }}
+            .modeline-hint {{
+                color: {THEME["muted"]};
+                font-size: 12px;
+                padding: 0 12px;
+            }}
+            .modeline-status {{
+                color: {THEME["foreground"]};
+                font-size: 13px;
+                font-weight: bold;
+                padding: 0 12px;
+            }}
+            .notes-overlay.section-active,
+            .refs-overlay.section-active,
+            .search-overlay.section-active {{
+                border-left: 3px solid {THEME["accent"]};
+                background-color: alpha({THEME["background"]}, 0.92);
             }}
             .notes-overlay {{
                 background-color: alpha({THEME["background"]}, 0.97);
@@ -2473,7 +2075,7 @@ class OmarchyReader(Gtk.Application):
             .ref-card label {{
                 color: {THEME["foreground"]};
             }}
-            .refs-overlay button.tab-active {{
+            .refs-overlay button.tab-active, .notes-overlay button.tab-active {{
                 background-color: alpha({THEME["accent"]}, 0.28);
                 border-radius: 6px;
                 font-weight: bold;
@@ -2493,6 +2095,23 @@ class OmarchyReader(Gtk.Application):
                 background-color: alpha({THEME["background"]}, 0.97);
                 border: 1px solid rgba(255,255,255,0.15);
                 border-radius: 12px;
+            }}
+            .search-overlay {{
+                background-color: alpha({THEME["background"]}, 0.98);
+                border-top: 1px solid rgba(255,255,255,0.15);
+            }}
+            .search-overlay entry {{
+                font-size: {self.font_size}px;
+                background: transparent;
+                border: none;
+                box-shadow: none;
+                padding: 4px 2px;
+                color: {THEME["foreground"]};
+            }}
+            .search-overlay row:selected {{
+                background-color: alpha({THEME["accent"]}, 0.35);
+                color: {THEME["foreground"]};
+                border-radius: 6px;
             }}
             switch {{
                 color: {THEME["foreground"]};
@@ -2631,9 +2250,63 @@ class OmarchyReader(Gtk.Application):
         return False
 
     def _title_label(self):
+        box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        box.set_halign(Gtk.Align.CENTER)
         self.title_label = Gtk.Label(label="Omarchy-Bible")
         self.title_label.get_style_context().add_class("title-label")
-        return self.title_label
+        box.pack_start(self.title_label, False, False, 0)
+
+        # Contextual tip sits next to the title (focus badge is on the left).
+        self._hint_label = Gtk.Label(label="")
+        self._hint_label.get_style_context().add_class("progress-label")
+        self._hint_label.set_visible(False)
+        box.pack_start(self._hint_label, False, False, 0)
+
+        self._header_box = box
+        return box
+
+    _FOCUS_NAMES = {"content": "Content", "notes": "Personal Space", "refs": "Resources"}
+
+    def _context_hint(self):
+        """A short tip for the next useful action, given current state."""
+        f = self._focus
+        home = getattr(self, "_on_home", False)
+        if home or not self.chapters:
+            return "Enter open · i import · x remove"
+        if f == "notes":
+            if self._ps_editing:
+                return "Esc back to keys · Ctrl+Enter add note · Ctrl+K to content"
+            return "Tab or 1-3 switch tabs · i edit · Ctrl+K to content"
+        if f == "refs":
+            return "Ctrl+J content · 1-5 tabs · j/k scroll · h/l tabs"
+        # content
+        tips = []
+        if self._notes_overlay.get_visible():
+            tips.append("Ctrl+J ⇄ Personal Space")
+        elif self._refs_overlay is not None and self._refs_overlay.get_visible():
+            tips.append("Ctrl+J ⇄ Resources")
+        if not self._notes_overlay.get_visible():
+            tips.append("Ctrl+P notes")
+        if self._refs_overlay is not None and not self._refs_overlay.get_visible():
+            tips.append("Ctrl+R refs")
+        return " · ".join(tips) or "Ctrl+P notes · Ctrl+R refs · Ctrl+T contents"
+
+    def _update_header_focus(self):
+        self._update_mode_line()
+        if not hasattr(self, "_focus_label") or self._focus_label is None:
+            return
+        home = getattr(self, "_on_home", False)
+        if home or not self.chapters:
+            self._focus_label.set_visible(False)
+            self._hint_label.set_visible(False)
+            return
+        name = self._FOCUS_NAMES.get(self._focus, "")
+        if name:
+            self._focus_label.set_text(f"● {name}")
+            self._focus_label.set_visible(True)
+        hint = self._context_hint()
+        self._hint_label.set_text(hint)
+        self._hint_label.set_visible(bool(hint))
 
     def _fs_button(self, text, target):
         btn = Gtk.Button(label=text)
@@ -2684,6 +2357,8 @@ class OmarchyReader(Gtk.Application):
             self._refs_overlay.set_visible(False)
         self._hide_settings()
         self._hide_help()
+        if self._dock is not None:
+            self._dock.set_visible(False)
         self._on_home = True
         self._home_options = []
         state = load_state()
@@ -2771,6 +2446,8 @@ document.addEventListener('click', function (e) {{
  </div>
  </body></html>"""
         self.webview.load_html(page_html, None)
+        self._focus = "content"
+        self._update_header_focus()
 
     def show_loading(self, msg="Opening EPUB file"):
         # Native GTK overlay — no second load_html, so no blank-window race.
@@ -2921,688 +2598,23 @@ document.addEventListener('click', function (e) {{
     def _open_book_real(self, path):
         try:
             self._on_home = False
-            self.book_path = path
-            self.book = epub.read_epub(path)
-            self._prepare_chapters()
-            if not self.chapters:
+            if self.doc is not None:
+                self.doc.close()
+            doc = Document.open(path)
+            if doc is None:
                 self.show_welcome()
                 return False
+            self.doc = doc
+            self.book_path = path
             start = 0
             if getattr(self, "_resume_index", None) is not None:
-                start = min(self._resume_index, len(self.chapters) - 1)
-            self.chapter_index = start
+                start = min(self._resume_index, doc.chapter_count() - 1)
+            doc.chapter_index = start
             GLib.idle_add(self._do_load_chapter, start)
         except Exception as e:
             self.show_welcome()
             self.progress_label.set_text(f"Error: {e}")
         return False
-
-    def _prepare_chapters(self):
-        self._chapter_verses = {}
-        self._chapter_refs = {}
-        self._chapter_slice = {}
-        self._item_text_cache = {}
-        self._book_res = {}
-        if self.bookdir:
-            shutil.rmtree(self.bookdir, ignore_errors=True)
-        self.bookdir = tempfile.mkdtemp(prefix="omarchy-bible-")
-
-        self._item_paths = {}
-        for item in self.book.get_items():
-            name = item.get_name()
-            if not name:
-                continue
-            safe = os.path.join(self.bookdir, name)
-            os.makedirs(os.path.dirname(safe) or self.bookdir, exist_ok=True)
-            try:
-                with open(safe, "wb") as f:
-                    f.write(item.get_content())
-                self._item_paths[name] = safe
-            except Exception:
-                pass
-
-        # Dedicated handling for Crossway "ESV Study Bible" style EPUBs: scripture
-        # lives in bNN.MM.Book.text.html files with anchor-based chapters
-        # (<span class="chapter-num">), per-verse <span class="verse-num">, and
-        # separate .studynotes.html / .crossrefs.html companions.
-        if self._looks_like_study_bible() and self._prepare_study_bible():
-            return
-
-        # Build chapters from the book's own table of contents (ebooklib exposes
-        # it as a flat list of epub.Link objects). This gives the structural
-        # chapter list (e.g. "Genesis", "Exodus", ...) rather than every spine
-        # item, which for many books is hundreds of raw fragments.
-        entries = self._flatten_toc()
-
-        # Many free Bibles (e.g. these eReaderBibles EPUBs) expose their TOC
-        # only through the NCX, which ebooklib does not populate into .toc.
-        # Parse the NCX directly in that case.
-        if not entries:
-            entries = self._parse_ncx()
-
-        # Some publishers (e.g. Crossway ESV) list only book-level entries in
-        # the TOC; the book file itself contains links to the chapter files.
-        # Expand those entries so each chapter becomes its own item.
-        expanded = []
-        for title, href in entries:
-            intro_name = self._resolve_href(href)
-            intro_path = self._item_paths.get(intro_name)
-            if intro_path:
-                links = self._extract_chapter_links(intro_path)
-                if links:
-                    for link_text, ch_href in links:
-                        ch_name = self._resolve_href(ch_href)
-                        ch_path = self._item_paths.get(ch_name)
-                        if ch_path:
-                            expanded.append((title, f"{title} {link_text}", ch_path, ch_name))
-                    continue
-            # No chapter links: treat this entry as a chapter itself.
-            if intro_path:
-                expanded.append((title, title or "Chapter", intro_path, intro_name))
-
-        # Fallback: no usable TOC, use document spine items.
-        if not expanded:
-            for item in self.book.get_items_of_type(ebooklib.ITEM_DOCUMENT):
-                name = item.get_name()
-                path = self._item_paths.get(name)
-                if not path:
-                    continue
-                title = getattr(item, "title", None) or os.path.basename(name)
-                expanded.append((title, title, path, name))
-
-        # Group chapters into books. For Crossway, book_title is already the
-        # book name. For flat chapter lists like KJV/ASV, book_title is the
-        # same as chapter_title; re-group by removing the trailing chapter
-        # number from the title.
-        books_map = {}
-        for book_title, ch_title, path, name in expanded:
-            if book_title not in books_map:
-                books_map[book_title] = []
-            books_map[book_title].append((ch_title, path, name))
-
-        if all(len(chs) == 1 for chs in books_map.values()):
-            books_map = {}
-            for book_title, ch_title, path, name in expanded:
-                m = re.match(r"^(.*?)\s+(\d+)$", (ch_title or "").strip())
-                bt = m.group(1).strip() if m else book_title
-                books_map.setdefault(bt, []).append((ch_title, path, name))
-
-        self.chapters = []
-        self._toc_books = []
-        for book_title, chs in books_map.items():
-            book_chapters = []
-            for ch_title, path, name in chs:
-                idx = len(self.chapters)
-                self.chapters.append(("", ch_title, path, name))
-                book_chapters.append({"title": ch_title, "index": idx, "verses": []})
-            self._toc_books.append({"title": book_title, "chapters": book_chapters})
-
-    def _looks_like_study_bible(self):
-        """True if the book has Crossway Study-Bible style bNN.MM.*.text.html."""
-        for name in self._item_paths:
-            if re.search(r'(?:^|/)b\d{2}\.\d{2}\..+\.text\.html$', name):
-                return True
-        return False
-
-    def _prepare_study_bible(self):
-        """Build chapters for a Crossway ESV Study Bible by slicing text files.
-
-        Chapters are anchor-based: each book's scripture lives in one or more
-        bNN.MM.Book.text.html files, and each chapter begins at a
-        '<span class="chapter-num">N</span>' preceded by the section heading
-        '<p id="vNN NNN 001">'. We record per-chapter (start, end) offsets into
-        the file so a chapter can be rendered on its own.
-        """
-        by_book = collections.OrderedDict()
-        for name, path in self._item_paths.items():
-            m = re.search(r'(?:^|/)b(\d{2})\.(\d{2})\.(.+?)\.text\.html$', name)
-            if m:
-                by_book.setdefault(m.group(1), []).append(
-                    (int(m.group(2)), name, path, m.group(3))
-                )
-        if not by_book:
-            return False
-
-        self.chapters = []
-        self._toc_books = []
-        self._chapter_slice = {}
-        for bid in sorted(by_book):
-            book_name = None
-            book_chapters = []
-            for _part, name, path, raw_name in sorted(by_book[bid]):
-                try:
-                    with open(path, "rb") as f:
-                        content = f.read().decode("utf-8", "replace")
-                except Exception:
-                    continue
-                if not book_name:
-                    h = re.search(r"<h2>(.*?)</h2>", content, flags=re.S)
-                    book_name = re.sub(r"<[^>]+>", "", h.group(1)).strip() if h else raw_name
-                marks = list(
-                    re.finditer(r'<span class="chapter-num">\s*(\d+)\s*</span>', content)
-                )
-                bounds = []
-                for mk in marks:
-                    cnum = int(mk.group(1))
-                    heading_id = f"v{bid}{cnum:03d}001"
-                    hp = content.find(f'id="{heading_id}"')
-                    start = mk.start()
-                    if hp != -1 and hp < mk.start():
-                        pstart = content.rfind("<p", 0, hp)
-                        if pstart != -1:
-                            start = pstart
-                    bounds.append((cnum, start))
-                for k, (cnum, start) in enumerate(bounds):
-                    if k + 1 < len(bounds):
-                        end = bounds[k + 1][1]
-                    else:
-                        be = content.find("</body>", start)
-                        end = be if be != -1 else len(content)
-                    idx = len(self.chapters)
-                    title = f"{book_name} {cnum}"
-                    self.chapters.append((book_name, title, path, name))
-                    self._chapter_slice[idx] = (start, end)
-                    book_chapters.append({"title": title, "index": idx, "verses": []})
-            if book_chapters:
-                self._toc_books.append(
-                    {"title": book_name or f"Book {int(bid)}", "chapters": book_chapters}
-                )
-        return bool(self.chapters)
-
-    def _extract_chapter_links(self, intro_path):
-        """Extract chapter file links from a book introduction page.
-
-        Used by Crossway-style EPUBs where the TOC lists only book-level files,
-        and the book file contains links like 'Chapter 1', 'Chapter 2', ...
-        """
-        try:
-            with open(intro_path, "rb") as f:
-                content = f.read().decode("utf-8", "replace")
-        except Exception:
-            return []
-        body = self._extract_body(content)
-        links = re.findall(
-            r'<a\s+[^>]*href="([^"]*)"[^>]*>(.*?)</a>',
-            body,
-            flags=re.I | re.S,
-        )
-        result = []
-        for href, text in links:
-            text = re.sub(r"<[^>]+>", "", text)
-            text = text.replace("&nbsp;", " ").replace("\xa0", " ").strip()
-            if not text:
-                continue
-            if not re.search(r"\bchapter\b|\bch\b", text, flags=re.I):
-                continue
-            ch_name = self._resolve_href(href)
-            if not ch_name or ch_name not in self._item_paths:
-                continue
-            result.append((text, href))
-        return result
-
-    def _chapter_body(self, chapter_index):
-        """Return the annotated (data-vn tagged) body HTML for one chapter.
-
-        For anchor-sliced study Bibles this returns just that chapter's slice;
-        for normal EPUBs it returns the whole chapter file's body.
-        """
-        if not 0 <= chapter_index < len(self.chapters):
-            return ""
-        _, _, path, _ = self.chapters[chapter_index]
-        try:
-            with open(path, "rb") as f:
-                content = f.read().decode("utf-8", "replace")
-        except Exception:
-            return ""
-        sl = self._chapter_slice.get(chapter_index)
-        if sl:
-            content = content[sl[0]:sl[1]]
-        body = self._annotate_verses(self._extract_body(content))
-        return self._inject_first_verse(body)
-
-    def _inject_first_verse(self, body):
-        """Tag the implicit verse 1 in study Bibles where only the chapter number
-        appears at the start of a chapter (no explicit '1' marker)."""
-        if re.search(r'data-vn="1"', body):
-            return body
-        return re.sub(
-            r'(<span class="chapter-num">\s*\d+\s*</span>)',
-            r'\1<span class="v" data-vn="1">1 </span>',
-            body,
-            count=1,
-            flags=re.I,
-        )
-
-    def _fill_verse_numbers(self, chapter_index):
-        """Populate the verse list for a chapter (fast; refs are lazy)."""
-        if chapter_index in self._chapter_verses:
-            return
-        if not 0 <= chapter_index < len(self.chapters):
-            return
-        body = self._chapter_body(chapter_index)
-        numbers = sorted({int(n) for n in re.findall(r'data-vn="(\d+)"', body)})
-        self._chapter_verses[chapter_index] = numbers
-
-    def _ensure_chapter_refs(self, chapter_index):
-        """Lazily compute the per-verse reference/commentary map for a chapter."""
-        if chapter_index in self._chapter_refs:
-            return
-        if not 0 <= chapter_index < len(self.chapters):
-            self._chapter_refs[chapter_index] = {}
-            return
-        _, _, path, _ = self.chapters[chapter_index]
-        body = self._chapter_body(chapter_index)
-        self._chapter_refs[chapter_index] = self._extract_refs(body, os.path.dirname(path))
-
-    def _get_book_resources(self, chapter_index):
-        """Return (intro_text, images, links) for the book a chapter belongs to.
-
-        Reads the book's .intros.html companion (present in Crossway study
-        Bibles) and the chapter's own slice to collect the introduction text,
-        embedded images/maps/charts, and external web links. Cached per chapter.
-        """
-        if chapter_index in self._book_res:
-            return self._book_res[chapter_index]
-        empty = ("", [], [])
-        if not 0 <= chapter_index < len(self.chapters):
-            return empty
-        book_name, _, path, name = self.chapters[chapter_index]
-        intro_text, images, links = "", [], []
-
-        # Locate the book's intros file: same bNN. prefix, .intros.html suffix.
-        m = re.search(r'(b\d{2})\.(\d{2})\.', name)
-        intro_body = ""
-        intro_dir = ""
-        if m:
-            bid = m.group(1)
-            intro_name = None
-            for candidate in self._item_paths:
-                if re.search(rf'(?:^|/){bid}\.\d{{2}}\..+\.intros\.html$', candidate):
-                    intro_name = candidate
-                    break
-            if intro_name:
-                try:
-                    with open(self._item_paths[intro_name], "rb") as f:
-                        raw = f.read().decode("utf-8", "replace")
-                    intro_body = self._extract_body(raw)
-                    intro_text = self._html_to_text(intro_body)
-                    intro_dir = os.path.dirname(self._item_paths[intro_name])
-                except Exception:
-                    intro_body = ""
-
-            # Images from the intros page.
-            seen = set()
-            for im in re.finditer(r'<img[^>]*\bsrc="([^"]+)"', intro_body, flags=re.I):
-                src = im.group(1)
-                base = os.path.basename(src)
-                cand = os.path.normpath(os.path.join(intro_dir, src)) if intro_dir else ""
-                if not (cand and os.path.isfile(cand)):
-                    cand = next(
-                        (p for n, p in self._item_paths.items()
-                         if os.path.basename(n) == base),
-                        "",
-                    )
-                if cand and cand not in seen:
-                    seen.add(cand)
-                    images.append({"path": cand, "caption": base})
-
-            # External links across the whole book (intros + notes + refs).
-            link_seen = set()
-            scan_names = [
-                n for n in self._item_paths
-                if re.search(rf'(?:^|/){bid}\.\d{{2}}\..+\.(?:intros|studynotes|crossrefs)\.html$', n)
-            ]
-            for n in scan_names:
-                try:
-                    with open(self._item_paths[n], "rb") as f:
-                        txt = f.read().decode("utf-8", "replace")
-                except Exception:
-                    continue
-                for lm in re.finditer(
-                    r'<a[^>]*\bhref="(https?://[^"]+)"[^>]*>(.*?)</a>', txt, flags=re.I | re.S
-                ):
-                    url = lm.group(1)
-                    if url in link_seen:
-                        continue
-                    link_seen.add(url)
-                    label = re.sub(r"<[^>]+>", "", lm.group(2)).strip()
-                    links.append({"url": url, "text": label or url})
-
-        result = (intro_text, images, links)
-        self._book_res[chapter_index] = result
-        return result
-
-    def _html_to_text(self, src):
-        """Convert an HTML fragment to readable plain text with blank-line breaks."""
-        t = re.sub(r"(?i)<(h[1-6])[^>]*>", "\n\n", src)
-        t = re.sub(r"(?i)</(p|div|h[1-6]|li|blockquote|tr)>", "\n\n", t)
-        t = re.sub(r"(?i)<br\s*/?>", "\n", t)
-        t = re.sub(r"<[^>]+>", "", t)
-        t = html.unescape(t)
-        t = re.sub(r"[ \t]+", " ", t)
-        t = re.sub(r"\n{3,}", "\n\n", t)
-        return t.strip()
-
-    def _extract_refs(self, body, chapter_dir):
-        """Build {verse_number: [{label, text}]} for footnote/commentary links.
-
-        Handles the common study-Bible marker styles: an <a> carrying an inline
-        title="..." note, an <a> linking to an id in the same chapter file, and
-        an <a> linking to an id in another extracted file (footnote appendix).
-        """
-        anchor_re = re.compile(
-            r'data-vn="(\d+)"|<a\b([^>]*?)>(.*?)</a>', re.I | re.S
-        )
-        refs = {}
-        current = None
-
-        def attr(attrs, name):
-            m = re.search(name + r'="([^"]*)"', attrs or "", re.I)
-            return m.group(1) if m else ""
-
-        def clean(seg):
-            seg = re.sub(r"<[^>]+>", " ", seg)
-            seg = html.unescape(seg)
-            return re.sub(r"\s+", " ", seg).strip()
-
-        def text_from(src, want_id):
-            m = re.search(r'id="' + re.escape(want_id) + r'"', src)
-            if not m:
-                return ""
-            pos = m.end()
-            gt = src.find(">", pos)
-            body_from = (gt + 1) if gt != -1 and gt < pos + 400 else pos
-            # Crossref entry: just this letter's refs until the next letter/verse.
-            if re.match(r"c\d+\.\w", want_id):
-                seg = src[body_from:body_from + 1200]
-                stop = re.search(r'<span class="crossref-|</p>|<h\d', seg)
-                if stop:
-                    seg = seg[:stop.start()]
-                return clean(seg)
-            # Study note / generic: capture the enclosing block element.
-            block_start = max(
-                src.rfind("<p", 0, m.start()),
-                src.rfind("<div", 0, m.start()),
-                src.rfind("<li", 0, m.start()),
-                src.rfind("<blockquote", 0, m.start()),
-            )
-            if block_start == -1:
-                block_start = m.start()
-            tagm = re.match(r"<(\w+)", src[block_start:])
-            tag = tagm.group(1) if tagm else "p"
-            close = src.find("</" + tag + ">", body_from)
-            if close == -1:
-                block_end = body_from + 2500
-            else:
-                block_end = close
-            seg = src[block_start:block_end]
-            return clean(seg)[:2500]
-
-        def resolve_text(href, title):
-            if title:
-                return html.unescape(title).strip()
-            if not href or href.startswith("http") or href.startswith("mailto"):
-                return ""
-            file_part, _, frag = href.partition("#")
-            if not frag:
-                return ""
-            if not file_part:
-                return text_from(body, frag)
-            fname = os.path.normpath(os.path.join(chapter_dir, file_part))
-            src = self._item_text_cache.get(fname)
-            if src is None:
-                try:
-                    with open(fname, "rb") as f:
-                        src = f.read().decode("utf-8", "replace")
-                except Exception:
-                    src = ""
-                self._item_text_cache[fname] = src
-            return text_from(src, frag)
-
-        for m in anchor_re.finditer(body):
-            if m.group(1) is not None:
-                current = int(m.group(1))
-                continue
-            attrs, inner = m.group(2), m.group(3)
-            label = html.unescape(re.sub(r"<[^>]+>", "", inner)).strip()
-            title = attr(attrs, "title")
-            href = attr(attrs, "href")
-            if current is None:
-                continue
-            if not title and not (href and "#" in href):
-                continue
-            text = resolve_text(href, title)
-            if not text:
-                continue
-            # Classify: Crossway puts study notes in *.studynotes.html (ids n…)
-            # and cross references in *.crossrefs.html (ids c…); an inline
-            # title-only marker is treated as a study note.
-            low = (href or "").lower()
-            frag = href.rsplit("#", 1)[-1] if "#" in href else ""
-            if "crossref" in low or frag[:1] == "c":
-                kind = "crossrefs"
-            else:
-                kind = "notes"
-            entry = {"label": label, "text": text, "kind": kind}
-            lst = refs.setdefault(current, [])
-            if not any(x["label"] == label and x["text"] == text for x in lst):
-                lst.append(entry)
-        return refs
-
-
-    def _flatten_toc(self):
-        """Return a flat list of (title, href) from the book's TOC.
-
-        ebooklib's `book.toc` is normally a flat list of epub.Link, but some
-        books nest sections as (Link, [children]) tuples. This flattens both.
-        """
-        result = []
-        raw = getattr(self.book, "toc", None) or []
-        if isinstance(raw, str):
-            return result
-        stack = list(raw)
-        while stack:
-            node = stack.pop(0)
-            if isinstance(node, tuple):
-                link, children = node[0], node[1]
-                if isinstance(link, str) or link is None:
-                    continue
-                try:
-                    if link.title:
-                        result.append((link.title, link.href))
-                except Exception:
-                    pass
-                if children:
-                    stack = list(children) + stack
-            else:
-                try:
-                    if getattr(node, "title", None):
-                        result.append((node.title, node.href))
-                except Exception:
-                    pass
-        return result
-
-    def _resolve_href(self, href):
-        """Resolve a TOC href to a document item name, or '' if not found."""
-        if not href:
-            return ""
-        target = href.split("#")[0].replace("\\", "/")
-        while target.startswith("./"):
-            target = target[2:]
-        # ebooklib item names may also carry a leading './'
-        if target in self._item_paths:
-            return target
-        stripped = target.lstrip("./")
-        for name in self._item_paths:
-            if name.lstrip("./") == stripped:
-                return name
-        return ""
-
-    def _parse_ncx(self):
-        """Parse the book's NCX to extract (title, href) chapter entries.
-
-        Many free Bibles (including the eReaderBibles EPUBs) keep their full
-        table of contents in the NCX file, which ebooklib does not translate
-        into `book.toc`. Here we walk the navMap and return the leaf navPoints
-        (those without nested children), skipping the parent book-name
-        containers so we end up with entries like "Genesis 1", "Genesis 2", ...
-        """
-        import xml.etree.ElementTree as ET
-
-        entries = []
-        ncx = None
-        for item in self.book.get_items():
-            if item.get_name().lower().endswith(("toc.ncx", ".ncx")):
-                ncx = item
-                break
-        if ncx is None:
-            return entries
-
-        try:
-            raw = (ncx.get_content() or b"").decode("utf-8", "replace")
-            root = ET.fromstring(raw)
-        except Exception:
-            return entries
-
-        ns = ""
-        if root.tag.startswith("{"):
-            ns = root.tag.split("}")[0] + "}"
-
-        def walk(navpoint):
-            label = navpoint.find(f"{ns}navLabel/{ns}text")
-            content = navpoint.find(f"{ns}content")
-            children = navpoint.findall(f"{ns}navPoint")
-            title = (label.text or "").strip() if label is not None else ""
-            src = content.get("src", "") if content is not None else ""
-            if not children and title and src:
-                entries.append((title, src))
-            for child in children:
-                walk(child)
-
-        navmap = root.find(f"{ns}navMap")
-        if navmap is not None:
-            for navpoint in navmap.findall(f"{ns}navPoint"):
-                walk(navpoint)
-
-        return entries
-
-    def _extract_body(self, content):
-        m = re.search(r"<body[^>]*>(.*?)</body>", content, re.S | re.I | re.DOTALL)
-        body = m.group(1) if m else content
-
-        # Drop anything that would inject its own colors/styles and override
-        # the reader's theme: <style>, <link>, <base>, and inline style
-        # attributes that set color or background.
-        body = re.sub(r"<style[\s\S]*?</style>", "", body, flags=re.I)
-        body = re.sub(r"<link\b[^>]*>", "", body, flags=re.I)
-        body = re.sub(r"<base\b[^>]*/?>", "", body, flags=re.I)
-
-        def neutral_style(attr):
-            value = re.sub(
-                r"([a-zA-Z-]*background[a-zA-Z-]*|color)\s*:\s*[^;\"']*;?",
-                "",
-                attr.group(1),
-                flags=re.I,
-            ).strip()
-            if value:
-                return 'style="' + value.rstrip("; ") + '"'
-            return ""
-
-        body = re.sub(r'style\s*=\s*"([^"]*)"', neutral_style, body, flags=re.I)
-        body = re.sub(r"style\s*=\s*'([^']*)'", neutral_style, body, flags=re.I)
-        return body
-
-    def _annotate_verses(self, body):
-        """Tag verse-number markers with data-vn so J/K can step per verse.
-
-        Handles several publisher styles: plain <sup>N</sup> (KJV/ASV),
-        <span class="bold">N </span> (ESV/EPUB), <span class="versenum">N</span>
-        (Crossway), and other class-based verse markers. Only the style that
-        actually appears is used.
-        """
-        # Plain <sup> numbers (KJV/ASV, many public-domain Bibles).
-        body = re.sub(
-            r"<sup[^>]*>(\d+)</sup>",
-            r'<sup class="v" data-vn="\1">\1</sup>',
-            body,
-            flags=re.I,
-        )
-        def _tag_verse_span(match):
-            inner = match.group(1)
-            text = re.sub(r"<[^>]+>", "", inner)
-            m = re.search(r"\d+", text)
-            if not m:
-                return match.group(0)
-            vn = m.group(0)
-            return f'<span class="v" data-vn="{vn}">{vn} </span>'
-
-        if len(re.findall(r'class="v"', body)) < 3:
-            # Known class-based verse markers (Crossway/ESV often use
-            # class="versenum" or class="bold"). Allow nested tags like
-            # <span class="bold"><big>1</big>:1 </span>.
-            body = re.sub(
-                r'<span\b[^>]*class="[^"]*(?:versenum|verse-num|verse|v|bold)[^"]*"[^>]*>(.*?)</span>',
-                _tag_verse_span,
-                body,
-                flags=re.I | re.S,
-            )
-        if len(re.findall(r'class="v"', body)) < 3:
-            # Generic span fallback: tag plain numeric spans only if there are
-            # enough of them to look like verse numbers.
-            candidates = re.findall(
-                r'<span\b[^>]*>(.*?)</span>', body, flags=re.I | re.S
-            )
-            numbers = [re.search(r"\d+", c) for c in candidates]
-            if len([n for n in numbers if n]) >= 3:
-                body = re.sub(
-                    r'<span\b[^>]*>(.*?)</span>',
-                    _tag_verse_span,
-                    body,
-                    flags=re.I | re.S,
-                )
-        return body
-
-    def _split_verses_into_lines(self, body):
-        """Split paragraphs that contain multiple verses so each verse is on
-        its own line. This makes j/k verse navigation feel like one line per
-        verse, especially for publisher EPUBs that pack many verses into a
-        single paragraph.
-        """
-        verse_span_pat = r'<span class="v" data-vn="(\d+)">\d+ </span>'
-
-        def split_paragraph(match):
-            p_open = match.group(1)
-            p_content = match.group(2)
-            markers = list(re.finditer(verse_span_pat, p_content))
-            if len(markers) < 2:
-                return match.group(0)
-            cls_match = re.search(r'class="([^"]*)"', p_open)
-            p_cls = cls_match.group(1) if cls_match else ""
-
-            # Split the content by verse markers; keep any leading text before
-            # the first marker attached to the first verse.
-            chunks = re.split(verse_span_pat, p_content)
-            lines = []
-            for i in range(1, len(chunks), 2):
-                vn = chunks[i]
-                text = chunks[i + 1] if i + 1 < len(chunks) else ""
-                if i == 1:
-                    text = chunks[0] + text
-                text = text.strip()
-                if not text:
-                    continue
-                lines.append(
-                    f'<p class="verse-line {p_cls}">'
-                    f'<span class="v" data-vn="{vn}">{vn} </span>{text}</p>'
-                )
-            return "\n".join(lines) if lines else match.group(0)
-
-        return re.sub(
-            r'(<p\b[^>]*>)(.*?)(</p>)',
-            split_paragraph,
-            body,
-            flags=re.I | re.S,
-        )
 
     # ---------------- Chapter loading ----------------
     def _do_load_chapter(self, index):
@@ -3613,7 +2625,7 @@ document.addEventListener('click', function (e) {{
         self.title_label.set_text(title)
         self.progress_label.set_text(f"{index + 1}/{len(self.chapters)}")
 
-        body_content = self._split_verses_into_lines(self._chapter_body(index))
+        body_content = self.source.chapter_html(index)
         base_url = "file://" + os.path.dirname(path) + "/"
 
         page_html = f"""<!doctype html><html><head><meta charset="utf-8">
@@ -3626,7 +2638,6 @@ document.addEventListener('click', function (e) {{
 
         self._is_loading = True
         self._page_pages = 0
-        self._fill_verse_numbers(index)
         self._refs_pinned = None
         self._show_spinner(True)
         self.webview.load_html(page_html, base_url)
@@ -3675,7 +2686,12 @@ document.addEventListener('click', function (e) {{
 
             # Make sure the reader has focus so j/k/h/l are handled by the page
             # as soon as the chapter finishes loading.
+            self._focus = "content"
+            self._active_section = "content"
+            if self._dock is not None:
+                self._dock.set_visible(True)
             self.webview.grab_focus()
+            self._update_header_focus()
 
             # If resuming into this chapter, jump to the saved page.
             if getattr(self, "_resume_index", None) == self.chapter_index:
@@ -3689,14 +2705,20 @@ document.addEventListener('click', function (e) {{
                     self._save_state()
 
             self._save_state()
+            # A pending verse (e.g. from search "John 3:16") jumps once the
+            # freshly loaded chapter is paginated.
+            if getattr(self, "_pending_verse", 0):
+                v = self._pending_verse
+                self._pending_verse = 0
+                GLib.idle_add(self._run_js, f"goToVerse({v});")
             if hasattr(self, "_page_pages"):
                 del self._page_pages
-            # "Always display" notes: keep the panel open across chapters.
-            if not SETTINGS.get("auto_hide_notes", True):
-                self._show_notes()
-            else:
-                self._hide_notes()
-                self._refresh_notes()
+            # Personal Space / Resources stay open across chapter loads; only
+            # refresh their content. They are closed via Ctrl+P / Ctrl+R (or the
+            # panel's own close button), never implicitly.
+            self._refresh_notes()
+            if self._refs_overlay is not None and self._refs_overlay.get_visible():
+                self._refresh_refs()
             if pages <= 0:
                 # empty chapter - advance to next non-empty automatically
                 self.next_chapter()
@@ -3705,6 +2727,7 @@ document.addEventListener('click', function (e) {{
             self._refs_pinned = None
             self._update_verse_label()
             self._refresh_refs()
+            self._refresh_notes()
         elif mtype == "ref":
             label = data.get("label", "")
             text = data.get("text", "")
@@ -3714,6 +2737,8 @@ document.addEventListener('click', function (e) {{
             self._refs_tab = kind
             self._show_refs()
             self._refresh_refs()
+        elif mtype == "memory_capture":
+            self._memory_add(int(data.get("verse") or 0), data.get("text", ""))
         elif mtype == "edge":
             if data.get("dir") == "next":
                 self.next_chapter()
@@ -3732,14 +2757,9 @@ document.addEventListener('click', function (e) {{
             print("JS error:", data.get("msg"), file=sys.stderr)
 
     def _save_state(self):
-        if not self.book_path:
+        if not self.doc or not self.book_path:
             return
-        filename = os.path.basename(self.book_path)
-        save_state({
-            "book": filename,
-            "chapter": self.chapter_index + 1,
-            "page": self.current_page + 1,
-        })
+        save_state(self.doc.to_state())
 
     def _continue_reading(self):
         state = load_state()
@@ -3768,8 +2788,16 @@ document.addEventListener('click', function (e) {{
             else:
                 self.loading_spinner.stop()
                 self.loading_spinner.set_visible(False)
+        if getattr(self, "_mode_spinner", None) is not None:
+            if visible:
+                self._mode_spinner.start()
+                self._mode_spinner.set_visible(True)
+            else:
+                self._mode_spinner.stop()
+                self._mode_spinner.set_visible(False)
         if self.progress_label:
             self.progress_label.set_text("Loading\u2026" if visible else "")
+        self._update_mode_line()
 
     def _show_progress(self, page_num):
         parts = []
@@ -3777,7 +2805,9 @@ document.addEventListener('click', function (e) {{
             parts.append(f"{self.chapter_index + 1}/{len(self.chapters)}")
         if getattr(self, "_page_pages", 0) > 0:
             parts.append(f"p{page_num}/{self._page_pages}")
-        self.progress_label.set_text(" \u00b7 ".join(parts))
+        if self.progress_label:
+            self.progress_label.set_text(" \u00b7 ".join(parts))
+        self._update_mode_line()
 
     def _run_js(self, script, callback=None):
         if self.webview:
@@ -3787,14 +2817,16 @@ document.addEventListener('click', function (e) {{
 
     # ---------------- Navigation ----------------
     def next_chapter(self):
-        if self.chapter_index + 1 < len(self.chapters):
-            self._do_load_chapter(self.chapter_index + 1)
+        nxt = self.doc.next_index() if self.doc else None
+        if nxt is not None:
+            self._do_load_chapter(nxt)
             return True
         return False
 
     def prev_chapter(self):
-        if self.chapter_index - 1 >= 0:
-            self._do_load_chapter(self.chapter_index - 1)
+        prv = self.doc.prev_index() if self.doc else None
+        if prv is not None:
+            self._do_load_chapter(prv)
             return True
         return False
 
@@ -3855,11 +2887,24 @@ document.addEventListener('click', function (e) {{
         ctrl = bool(state & Gdk.ModifierType.CONTROL_MASK)
         shift = bool(state & Gdk.ModifierType.SHIFT_MASK)
 
+        # While the search overlay is open, its entry/list own the keyboard.
+        if self._search_overlay is not None and self._search_overlay.get_visible():
+            return False
+
+        # "/" opens the go-to-passage search (not while typing elsewhere).
+        if not ctrl and not shift and kn == "slash" and self.chapters:
+            self._open_search()
+            return True
+
         # All keybinding checks use the lower-cased keyname so Shift/CapsLock
         # do not break hotkeys (e.g. Ctrl+L arriving as keyval "L").
         if kn == "escape":
             if self._notes_overlay.get_visible():
-                self._hide_notes()
+                # In edit mode, Escape returns to navigate mode; otherwise close.
+                if self._ps_editing:
+                    self._exit_ps_edit()
+                else:
+                    self._hide_notes()
                 return True
             if self._refs_overlay is not None and self._refs_overlay.get_visible():
                 self._hide_refs()
@@ -3882,6 +2927,15 @@ document.addEventListener('click', function (e) {{
         # three sections (notes list -> add a note -> content); handled while
         # typing too.
         if ctrl:
+            # Ctrl+1..3 / Ctrl+Shift+1..5 switch tabs while typing is active.
+            if not shift and kn in ("1", "2", "3") and self._notes_overlay.get_visible():
+                self._set_ps_tab({"1": "notes", "2": "prayer", "3": "memory"}[kn])
+                return True
+            if shift and kn in ("1", "2", "3", "4", "5") and self._refs_overlay.get_visible():
+                key = {"1": "notes", "2": "crossrefs", "3": "intro",
+                       "4": "images", "5": "links"}[kn]
+                self._set_ref_tab(key)
+                return True
             if not shift and kn == "r":
                 # Ctrl+r toggles the reference/commentary panel.
                 self._toggle_refs()
@@ -3897,25 +2951,24 @@ document.addEventListener('click', function (e) {{
                 self._toggle_header()
                 return True
             if shift and keyname in ("plus", "equal"):
-                if self._refs_overlay is not None and self._refs_overlay.get_visible():
+                if self._focus_in_refs():
                     self._grow_refs_height()
                 else:
                     self._grow_note_height()
                 return True
             if shift and keyname in ("minus", "underscore"):
-                if self._refs_overlay is not None and self._refs_overlay.get_visible():
+                if self._focus_in_refs():
                     self._shrink_refs_height()
                 else:
                     self._shrink_note_height()
                 return True
             if not shift and kn == "h":
-                # Ctrl+h always jumps to the highlight-able notes list
-                # (works even while typing a note).
-                self._set_section("list")
+                # Ctrl+h focuses the Personal Space notes editor (works while typing).
+                self._edit_from_list()
                 return True
             if not shift and kn == "l":
-                # Ctrl+l: from a highlighted note, load it for editing in the
-                # add-note editor; otherwise open a fresh editor.
+                # Ctrl+l also focuses the Personal Space notes editor for the
+                # current verse.
                 self._edit_from_list()
                 return True
             if not shift and kn in ("j", "k"):
@@ -3931,9 +2984,6 @@ document.addEventListener('click', function (e) {{
                 return True
             if self._hotkey_matches(HOTKEYS.get("settings"), keyname, state):
                 self._toggle_settings()
-                return True
-            if self._hotkey_matches(HOTKEYS.get("home"), keyname, state):
-                self.show_welcome()
                 return True
             if self._hotkey_matches(HOTKEYS.get("home_bracket"), keyname, state):
                 self.show_welcome()
@@ -3997,27 +3047,51 @@ document.addEventListener('click', function (e) {{
                 self._home_delete()
                 return True
 
-        # While typing in the notes editor, let plain keys type — do not let
-        # H/L/J/K/x etc. trigger hotkeys (limit hotkeys while typing). Ctrl+
-        # combos and Escape were already handled above.
-        if self._focus_in_text_input():
+        # When Personal Space is focused but the user is typing in a text field
+        # (notes editor / prayer entry), let plain keys type. Tab switching while
+        # typing is done with Ctrl+1/2/3 (handled in the Ctrl block).
+        if self._focus == "notes" and self._focus_in_text_input():
             return False
 
-        # Number keys 1-5 switch the Resources panel tab when it is visible.
-        if (
-            not ctrl
-            and not shift
-            and self._refs_overlay is not None
-            and self._refs_overlay.get_visible()
-            and kn in ("1", "2", "3", "4", "5")
-        ):
-            key = {"1": "notes", "2": "crossrefs", "3": "intro", "4": "images", "5": "links"}[kn]
-            self._set_ref_tab(key)
-            return True
+        # Number keys switch tabs for the focused panel: 1-5 for Resources,
+        # 1-3 for Personal Space (Notes / Prayer / Memory).
+        if not ctrl and not shift and kn in ("1", "2", "3", "4", "5"):
+            if self._focus == "refs":
+                key = {
+                    "1": "notes", "2": "crossrefs", "3": "intro",
+                    "4": "images", "5": "links",
+                }.get(kn)
+                if key:
+                    self._set_ref_tab(key)
+                    return True
+            elif self._focus == "notes":
+                key = {"1": "notes", "2": "prayer", "3": "memory"}.get(kn)
+                if key:
+                    self._set_ps_tab(key)
+                    return True
+
+        # Personal Space "navigate" mode (focus is a tab button, not typing):
+        # Tab / Shift-Tab cycle tabs, i enters the text field, h/l also switch.
+        if self._focus == "notes" and not self._ps_editing:
+            if not ctrl and kn == "i":
+                self._enter_ps_edit()
+                return True
+            if kn == "tab":
+                self._cycle_ps_tab(-1 if shift else 1)
+                return True
+            if kn == "backtab":
+                self._cycle_ps_tab(-1)
+                return True
+            if not ctrl and kn == "l":
+                self._cycle_ps_tab(1)
+                return True
+            if not ctrl and kn == "h":
+                self._cycle_ps_tab(-1)
+                return True
 
         # When the Resources panel is focused, j/k (and arrows) scroll it and
         # h/l switch tabs — without touching where you are in the content.
-        if self._focus_in_refs():
+        if self._focus == "refs":
             if kn in ("j", "down"):
                 self._scroll_refs(1)
                 return True
@@ -4038,34 +3112,21 @@ document.addEventListener('click', function (e) {{
                 return True
             return False
 
-        # If focus is in the reader webview, let the page's JS handle the
-        # reader navigation keys (j/k/up/down step verses, h/l/left/right page).
-        # If an overlay is visible, consume those keys instead so the reader
-        # doesn't page behind the overlay.
-        if self._focus_in_webview():
-            if self.toc_overlay.get_visible() or self._notes_overlay.get_visible():
-                if kn in ("j", "k", "up", "down", "h", "l", "left", "right"):
-                    return True
-            elif kn in ("j", "k", "up", "down", "h", "l", "left", "right"):
+        # Content focus: j/k/h/l/arrows are handled by the page's own JS (verse
+        # stepping + paging), so let them through. Space/Page keys page here.
+        if self._focus == "content":
+            if kn in ("j", "k", "up", "down", "h", "l", "left", "right"):
                 return False
+            if kn == "page_down" or kn == "space":
+                self._run_js("nextPage();")
+                return True
+            if kn == "page_up":
+                self._run_js("prevPage();")
+                return True
+            return False
 
-        # Notes list navigation: j/k and up/down move the highlight, x deletes.
-        # h/l/left/right are consumed so they don't page the reader behind the
-        # notes overlay.
-        if self._notes_zone == "list" and self._note_card_rows:
-            if kn in ("j", "down"):
-                self._move_highlight(1)
-                return True
-            if kn in ("k", "up"):
-                self._move_highlight(-1)
-                return True
-            if kn == "x":
-                self._delete_highlighted()
-                return True
-            if kn in ("h", "l", "left", "right"):
-                return True
-
-        # Paging: h/l and arrow/page keys always work.
+        # Paging: h/l and arrow/page keys work in any non-content focus too
+        # (e.g. Personal Space browsing a tab without a text field).
         if kn in ("h", "left"):
             self._run_js("prevPage();")
             return True

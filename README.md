@@ -48,22 +48,24 @@ typography and layout while staying true to the Omarchy look.
 
 - `Ctrl + T` — table of contents: books → chapters → verses (arrow keys / `j` /
   `k` to move, `Enter` to open, `h` / `Back` / `Esc` to go back)
-- `Ctrl + N` — Personal Notes panel (New button or Ctrl+Enter to add a note;
-  Ctrl+l to edit a highlighted one)
+- `Ctrl + P` — Personal Space panel (Notes · Prayer · Memory). Two modes:
+  navigate (default — `Tab`/`1-3`/`h`/`l` switch tabs, `i` enters the field)
+  and edit (typing; `Esc` back to navigate; `Ctrl+Enter` saves a note)
 - `Ctrl + R` — Resources panel above the notes: **1 Notes · 2 Cross-refs ·
   3 Intro · 4 Images · 5 Links**. When focused, `j`/`k` scroll it and `h`/`l`
   switch tabs (this does not move your place in the reading content);
   `Ctrl + Shift + +/-` resizes it
 - `Ctrl + S` — settings
-- `Ctrl + h` — jump to the notes list (works even while typing a note)
-- `Ctrl + l` — add a note / edit the highlighted note (loads it into the editor)
-- `Ctrl + j` / `Ctrl + k` — move focus between content ⇄ personal notes ⇄
-  resources (also works while typing a note)
-- Mouse: click the reading area, the notes panel, or the resources panel to move
-  focus there directly
+- `Ctrl + h` / `Ctrl + l` — focus the Personal Space notes editor
+- `Ctrl + j` / `Ctrl + k` — move focus between content ⇄ personal space ⇄
+  resources (also works while typing; only cycles panels that are open)
+- Mouse: click the reading area, the Personal Space panel, or the resources
+  panel to move focus there directly
 - `Ctrl + Shift + K` — keybinding reference
 - `Ctrl + Shift + H` — toggle header
-- `Ctrl + [` / `Ctrl + P` — home / translations browser
+- `Ctrl + [` — home / translations browser
+- `/` — search a book or passage (e.g. `John 3:16`, `gen 50`, `ps 23`); `↑/↓`
+  select, `Enter` jumps to the chapter (and highlights the verse), `Esc` closes
 - `Ctrl + B` — toggle reader mode
 - `Ctrl + O` — open a book file (disabled on the home screen)
 - `Ctrl + I` — import an EPUB into the library (on Home: `i`)
