@@ -602,6 +602,13 @@ class OmarchyReader(Gtk.Application):
         sp = Gtk.Box()
         sp.set_hexpand(True)
         ml.pack_start(sp, True, True, 0)
+        self._mode_spinner = Gtk.Spinner()
+        self._mode_spinner.set_size_request(14, 14)
+        self._mode_spinner.set_visible(False)
+        ml.pack_end(self._mode_spinner, False, False, 0)
+        self._mode_status = Gtk.Label(label="")
+        self._mode_status.get_style_context().add_class("modeline-status")
+        ml.pack_end(self._mode_status, False, False, 0)
         self._mode_hint = Gtk.Label(label="")
         self._mode_hint.get_style_context().add_class("modeline-hint")
         ml.pack_end(self._mode_hint, False, False, 0)
@@ -647,6 +654,21 @@ class OmarchyReader(Gtk.Application):
         self._set_section_frame(self._search_overlay, False)
         if hasattr(self, "_mode_hint"):
             self._mode_hint.set_text(self._context_hint())
+        if hasattr(self, "_mode_status"):
+            self._mode_status.set_text(self._status_text())
+
+    def _status_text(self):
+        home = getattr(self, "_on_home", False)
+        if home or not self.chapters:
+            return ""
+        title = self.chapters[self.chapter_index][1] if 0 <= self.chapter_index < len(self.chapters) else ""
+        text = title
+        if self._current_verse:
+            text += f":{self._current_verse}"
+        pages = getattr(self, "_page_pages", 0) or self.page_count
+        if pages:
+            text += f"   {self.current_page + 1}/{pages}"
+        return text
 
     # ---------------- Notes ----------------
     def _build_notes_overlay(self):
@@ -1985,6 +2007,12 @@ class OmarchyReader(Gtk.Application):
                 font-size: 12px;
                 padding: 0 12px;
             }}
+            .modeline-status {{
+                color: {THEME["foreground"]};
+                font-size: 13px;
+                font-weight: bold;
+                padding: 0 12px;
+            }}
             .notes-overlay.section-active,
             .refs-overlay.section-active,
             .search-overlay.section-active {{
@@ -2760,8 +2788,16 @@ document.addEventListener('click', function (e) {{
             else:
                 self.loading_spinner.stop()
                 self.loading_spinner.set_visible(False)
+        if getattr(self, "_mode_spinner", None) is not None:
+            if visible:
+                self._mode_spinner.start()
+                self._mode_spinner.set_visible(True)
+            else:
+                self._mode_spinner.stop()
+                self._mode_spinner.set_visible(False)
         if self.progress_label:
             self.progress_label.set_text("Loading\u2026" if visible else "")
+        self._update_mode_line()
 
     def _show_progress(self, page_num):
         parts = []
@@ -2769,7 +2805,9 @@ document.addEventListener('click', function (e) {{
             parts.append(f"{self.chapter_index + 1}/{len(self.chapters)}")
         if getattr(self, "_page_pages", 0) > 0:
             parts.append(f"p{page_num}/{self._page_pages}")
-        self.progress_label.set_text(" \u00b7 ".join(parts))
+        if self.progress_label:
+            self.progress_label.set_text(" \u00b7 ".join(parts))
+        self._update_mode_line()
 
     def _run_js(self, script, callback=None):
         if self.webview:
