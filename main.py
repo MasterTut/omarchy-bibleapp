@@ -103,6 +103,8 @@ DEFAULT_HOTKEYS = {
     "page_next": "Ctrl+Right",
     "page_prev": "Ctrl+Left",
     "note": "Ctrl+n",
+    "refs": "Ctrl+r",
+    "import": "Ctrl+i",
     "home": "Ctrl+p",
     "home_bracket": "Ctrl+bracketleft",
     "settings": "Ctrl+s",
@@ -864,6 +866,7 @@ class OmarchyReader(Gtk.Application):
         self._item_text_cache = {}
         self._refs_overlay = None
         self._refs_pinned = None
+        self._refs_panel_height = 240
         self.chapter_index = 0
         self.current_page = 0
         self.current_ch = 0
@@ -1078,6 +1081,7 @@ class OmarchyReader(Gtk.Application):
         scroller.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
         scroller.set_vexpand(True)
         scroller.add(self.toc_list)
+        self._toc_scroller = scroller
 
         self.toc_overlay.pack_start(bar, False, False, 0)
         self.toc_overlay.pack_start(scroller, True, True, 0)
@@ -1189,8 +1193,10 @@ class OmarchyReader(Gtk.Application):
         self.toc_overlay.set_visible(True)
         # Highlight the book containing the current chapter.
         if self._toc_rows and 0 <= self._toc_book_idx < len(self._toc_rows):
-            self.toc_list.select_row(self._toc_rows[self._toc_book_idx])
+            row = self._toc_rows[self._toc_book_idx]
+            self.toc_list.select_row(row)
             self.toc_list.grab_focus()
+            self._scroll_to_toc_row(row)
 
     def _hide_toc(self):
         self.toc_overlay.set_visible(False)
@@ -1212,8 +1218,40 @@ class OmarchyReader(Gtk.Application):
         target = current + offset
         if target < 0 or target >= len(self._toc_rows):
             return
-        self.toc_list.select_row(self._toc_rows[target])
-        self.toc_list.scroll_to_row(self._toc_rows[target])
+        row = self._toc_rows[target]
+        self.toc_list.select_row(row)
+        self._scroll_to_toc_row(row)
+
+    def _scroll_to_toc_row(self, row):
+        """Scroll the TOC list so the selected row is fully visible.
+
+        scroll_to_row can under-scroll at the very bottom (the last row can end
+        up below the fold), so we scroll minimally via the ScrolledWindow
+        adjustment instead, once the row has been allocated.
+        """
+        def ensure():
+            if row is None or self._toc_scroller is None:
+                return False
+            adj = self._toc_scroller.get_vadjustment()
+            if adj is None:
+                self.toc_list.scroll_to_row(row)
+                return False
+            # Translate the row's allocation into the scrolled window's coords.
+            alloc = row.get_allocation()
+            list_alloc = self.toc_list.get_allocation()
+            top = alloc.y - (list_alloc.y - 0)
+            bottom = top + alloc.height
+            vis_top = adj.get_value()
+            vis_bottom = vis_top + adj.get_page_size()
+            if top < vis_top:
+                adj.set_value(max(adj.get_lower(), top))
+            elif bottom > vis_bottom:
+                adj.set_value(min(adj.get_upper() - adj.get_page_size(),
+                                  bottom - adj.get_page_size()))
+            return False
+
+        # Defer one frame so the newly selected row has an allocation.
+        GLib.idle_add(ensure)
 
     def _toc_activate_current(self):
         if not self.toc_overlay.get_visible():
@@ -1360,7 +1398,7 @@ class OmarchyReader(Gtk.Application):
         self._refs_overlay.set_visible(False)
         self._refs_overlay.set_halign(Gtk.Align.FILL)
         self._refs_overlay.set_valign(Gtk.Align.END)
-        self._refs_overlay.set_size_request(-1, 240)
+        self._refs_overlay.set_size_request(-1, self._refs_panel_height)
         self._refs_overlay.get_style_context().add_class("refs-overlay")
 
         bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
@@ -1494,6 +1532,19 @@ class OmarchyReader(Gtk.Application):
     def _shrink_note_height(self, amount=40):
         self._apply_note_height(max(160, self._note_panel_height - amount))
 
+    def _apply_refs_height(self, height):
+        """Set the height of the references panel."""
+        self._refs_panel_height = int(height)
+        if self._refs_overlay is not None:
+            self._refs_overlay.set_size_request(-1, self._refs_panel_height)
+        self._position_refs_above_notes()
+
+    def _grow_refs_height(self, amount=40):
+        self._apply_refs_height(self._refs_panel_height + amount)
+
+    def _shrink_refs_height(self, amount=40):
+        self._apply_refs_height(max(140, self._refs_panel_height - amount))
+
     def _notes_lose_focus_appearance(self):
         """Make the notes panel look unfocused without hiding it."""
         self._notes_zone = "editor"
@@ -1575,6 +1626,26 @@ class OmarchyReader(Gtk.Application):
             self._on_import_epub()
         else:
             self.open_book(os.path.join(TRANSLATIONS_DIR, sel))
+
+    def _home_delete(self):
+        """Remove the highlighted translation file (x on the home screen)."""
+        if not self._home_options:
+            return
+        idx = self._home_sel % len(self._home_options)
+        sel = self._home_options[idx]
+        if sel in ("continue", "import"):
+            return
+        path = os.path.join(TRANSLATIONS_DIR, sel)
+        try:
+            if os.path.abspath(path) == os.path.abspath(self.book_path or ""):
+                raise ValueError("Close the book before removing it.")
+            os.remove(path)
+            msg = f"Removed {sel}."
+        except Exception as e:
+            msg = f"Could not remove {sel}: {e}"
+        # Keep the selection near the top of the remaining list.
+        self._home_sel = 0
+        self.show_welcome(msg)
 
     def _move_verse(self, direction):
         """J steps down / K steps up through the verses in the current page."""
@@ -2064,12 +2135,13 @@ class OmarchyReader(Gtk.Application):
             ("Ctrl + Shift + K", "Keybindings reference"),
             ("Ctrl + [ / Ctrl + P", "Home / choose a translation"),
             ("Ctrl + B", "Toggle reader mode"),
-            ("Ctrl + O", "Open a book file"),
+            ("Ctrl + I", "Import an EPUB into the library"),
+            ("Ctrl + O", "Open a book file (in the reader)"),
             ("H / L / ← / →", "Previous / next page (left / right)"),
             ("J / K / ↑ / ↓", "Notes highlighted: move up / down · content: step verses (j/↓ down, k/↑ up)"),
-            ("Home: j/k", "Select Continue where you left off / Translations, Enter"),
-            ("x", "Delete the highlighted note"),
-            ("Ctrl + Shift + +/-", "Grow / shrink note panel"),
+            ("Home: j/k, i, x", "Move selection · i imports · x removes a translation"),
+            ("x", "Delete the highlighted note (or, on Home, the translation)"),
+            ("Ctrl + Shift + +/-", "Grow / shrink the notes or references panel"),
             ("Ctrl + Right / Ctrl + Left", "Traverse chapters"),
         ]
         lines = "\n".join(
@@ -2513,7 +2585,7 @@ document.addEventListener('click', function (e) {{
       <span class="book-name">Import EPUB</span>
     </a>
   </div>
-   <div class="home-footer">j/k select · Enter open · Ctrl+[ home · Ctrl+Shift+K keys</div>
+   <div class="home-footer">j/k select · Enter open · i import · x remove · Ctrl+Shift+K keys</div>
  </div>
  </body></html>"""
         self.webview.load_html(page_html, None)
@@ -2643,7 +2715,7 @@ document.addEventListener('click', function (e) {{
                 target = os.path.join(TRANSLATIONS_DIR, name)
                 if os.path.abspath(path) != os.path.abspath(target):
                     shutil.copy2(path, target)
-                msg = f"Imported {name}. Select it above to open."
+                msg = f"Imported {name}. Select it below to open."
                 log_import(f"import OK: {msg}")
             except Exception as e:
                 log_import(f"import error: {e!r}")
@@ -3528,6 +3600,10 @@ document.addEventListener('click', function (e) {{
                 # Ctrl+r toggles the reference/commentary panel.
                 self._toggle_refs()
                 return True
+            if not shift and kn == "i":
+                # Ctrl+i imports an EPUB into the library.
+                self._on_import_epub()
+                return True
             if shift and kn == "k":
                 self._toggle_help()
                 return True
@@ -3535,10 +3611,16 @@ document.addEventListener('click', function (e) {{
                 self._toggle_header()
                 return True
             if shift and keyname in ("plus", "equal"):
-                self._grow_note_height()
+                if self._refs_overlay is not None and self._refs_overlay.get_visible():
+                    self._grow_refs_height()
+                else:
+                    self._grow_note_height()
                 return True
             if shift and keyname in ("minus", "underscore"):
-                self._shrink_note_height()
+                if self._refs_overlay is not None and self._refs_overlay.get_visible():
+                    self._shrink_refs_height()
+                else:
+                    self._shrink_note_height()
                 return True
             if not shift and kn == "h":
                 # Ctrl+h always jumps to the highlight-able notes list
@@ -3589,7 +3671,9 @@ document.addEventListener('click', function (e) {{
                 self._run_js("prevPage();")
                 return True
             if kn == "o":
-                self.on_open()
+                # Open-file dialog is replaced by Import on the home screen.
+                if not self._on_home:
+                    self.on_open()
                 return True
 
         # Table of contents: arrow keys + Neo-Vim J/k navigation.
@@ -3611,8 +3695,8 @@ document.addEventListener('click', function (e) {{
             if kn in ("l", "right"):
                 return True
 
-        # Home screen: j/k select between "Continue where you left off" and
-        # "Translations"; Enter activates the selection.
+        # Home screen: j/k move the selection, Enter opens, x deletes a
+        # translation, i imports an EPUB.
         if self._on_home:
             if kn == "j":
                 self._home_move(1)
@@ -3622,6 +3706,12 @@ document.addEventListener('click', function (e) {{
                 return True
             if kn in ("return", "kp_enter"):
                 self._home_activate()
+                return True
+            if kn == "i":
+                self._on_import_epub()
+                return True
+            if kn == "x":
+                self._home_delete()
                 return True
 
         # While typing in the notes editor, let plain keys type — do not let
