@@ -11,6 +11,7 @@ import json
 import tomllib
 import tempfile
 import shutil
+import collections
 
 import gi
 
@@ -859,6 +860,7 @@ class OmarchyReader(Gtk.Application):
         self.chapters = []
         self._chapter_verses = {}
         self._chapter_refs = {}
+        self._chapter_slice = {}
         self._item_text_cache = {}
         self._refs_overlay = None
         self._refs_pinned = None
@@ -1425,6 +1427,10 @@ class OmarchyReader(Gtk.Application):
         """Re-render the reference panel for the currently highlighted verse."""
         if self._refs_overlay is None or not self._refs_overlay.get_visible():
             return
+        # Compute per-verse references lazily the first time the panel is shown
+        # for a chapter (this can read the study-notes / crossrefs companions).
+        if self.chapter_index not in self._chapter_refs:
+            self._ensure_chapter_refs(self.chapter_index)
         for child in self._refs_body.get_children():
             self._refs_body.remove(child)
 
@@ -2598,28 +2604,37 @@ document.addEventListener('click', function (e) {{
 
         def worker():
             try:
+                def is_verse(html):
+                    return bool(
+                        re.search(r"<sup[^>]*>\d+</sup>", html, flags=re.I)
+                        or re.search(
+                            r'class="[^"]*(?:verse-num|versenum|chapter-num|bold)[^"]*"'
+                            r'[^>]*>[^<]*\d',
+                            html,
+                            flags=re.I,
+                        )
+                    )
                 with zipfile.ZipFile(path) as zf:
+                    entries = [
+                        n for n in zf.namelist()
+                        if n.lower().endswith((".xhtml", ".html", ".htm"))
+                    ]
+                    # Prefer scripture-looking files first (e.g. Crossway
+                    # bNN.NN.*.text.html), then scan the rest.
+                    priority = [n for n in entries if re.search(r'/b\d+\.\d+\..*\.text\.html$', n)]
+                    ordered = priority + [n for n in entries if n not in priority]
                     verse_found = False
                     scanned = 0
-                    for entry in zf.namelist():
-                        if not entry.lower().endswith((".xhtml", ".html", ".htm")):
-                            continue
+                    for entry in ordered:
                         try:
-                            text = zf.read(entry)[:30000].decode("utf-8", "replace")
+                            text = zf.read(entry)[:40000].decode("utf-8", "replace")
                         except Exception:
                             continue
                         scanned += 1
-                        if re.search(r"<sup[^>]*>\d+</sup>", text, flags=re.I):
+                        if is_verse(text):
                             verse_found = True
                             break
-                        if re.search(
-                            r'class="[^"]*(?:versenum|verse-num|bold)[^"]*"[^>]*>[^<]*\d',
-                            text,
-                            flags=re.I,
-                        ):
-                            verse_found = True
-                            break
-                        if scanned >= 40:
+                        if scanned >= 80:
                             break
                 if not verse_found:
                     raise ValueError(
@@ -2669,6 +2684,10 @@ document.addEventListener('click', function (e) {{
         return False
 
     def _prepare_chapters(self):
+        self._chapter_verses = {}
+        self._chapter_refs = {}
+        self._chapter_slice = {}
+        self._item_text_cache = {}
         if self.bookdir:
             shutil.rmtree(self.bookdir, ignore_errors=True)
         self.bookdir = tempfile.mkdtemp(prefix="omarchy-bible-")
@@ -2686,6 +2705,13 @@ document.addEventListener('click', function (e) {{
                 self._item_paths[name] = safe
             except Exception:
                 pass
+
+        # Dedicated handling for Crossway "ESV Study Bible" style EPUBs: scripture
+        # lives in bNN.MM.Book.text.html files with anchor-based chapters
+        # (<span class="chapter-num">), per-verse <span class="verse-num">, and
+        # separate .studynotes.html / .crossrefs.html companions.
+        if self._looks_like_study_bible() and self._prepare_study_bible():
+            return
 
         # Build chapters from the book's own table of contents (ebooklib exposes
         # it as a flat list of epub.Link objects). This gives the structural
@@ -2756,6 +2782,78 @@ document.addEventListener('click', function (e) {{
                 book_chapters.append({"title": ch_title, "index": idx, "verses": []})
             self._toc_books.append({"title": book_title, "chapters": book_chapters})
 
+    def _looks_like_study_bible(self):
+        """True if the book has Crossway Study-Bible style bNN.MM.*.text.html."""
+        for name in self._item_paths:
+            if re.search(r'(?:^|/)b\d{2}\.\d{2}\..+\.text\.html$', name):
+                return True
+        return False
+
+    def _prepare_study_bible(self):
+        """Build chapters for a Crossway ESV Study Bible by slicing text files.
+
+        Chapters are anchor-based: each book's scripture lives in one or more
+        bNN.MM.Book.text.html files, and each chapter begins at a
+        '<span class="chapter-num">N</span>' preceded by the section heading
+        '<p id="vNN NNN 001">'. We record per-chapter (start, end) offsets into
+        the file so a chapter can be rendered on its own.
+        """
+        by_book = collections.OrderedDict()
+        for name, path in self._item_paths.items():
+            m = re.search(r'(?:^|/)b(\d{2})\.(\d{2})\.(.+?)\.text\.html$', name)
+            if m:
+                by_book.setdefault(m.group(1), []).append(
+                    (int(m.group(2)), name, path, m.group(3))
+                )
+        if not by_book:
+            return False
+
+        self.chapters = []
+        self._toc_books = []
+        self._chapter_slice = {}
+        for bid in sorted(by_book):
+            book_name = None
+            book_chapters = []
+            for _part, name, path, raw_name in sorted(by_book[bid]):
+                try:
+                    with open(path, "rb") as f:
+                        content = f.read().decode("utf-8", "replace")
+                except Exception:
+                    continue
+                if not book_name:
+                    h = re.search(r"<h2>(.*?)</h2>", content, flags=re.S)
+                    book_name = re.sub(r"<[^>]+>", "", h.group(1)).strip() if h else raw_name
+                marks = list(
+                    re.finditer(r'<span class="chapter-num">\s*(\d+)\s*</span>', content)
+                )
+                bounds = []
+                for mk in marks:
+                    cnum = int(mk.group(1))
+                    heading_id = f"v{bid}{cnum:03d}001"
+                    hp = content.find(f'id="{heading_id}"')
+                    start = mk.start()
+                    if hp != -1 and hp < mk.start():
+                        pstart = content.rfind("<p", 0, hp)
+                        if pstart != -1:
+                            start = pstart
+                    bounds.append((cnum, start))
+                for k, (cnum, start) in enumerate(bounds):
+                    if k + 1 < len(bounds):
+                        end = bounds[k + 1][1]
+                    else:
+                        be = content.find("</body>", start)
+                        end = be if be != -1 else len(content)
+                    idx = len(self.chapters)
+                    title = f"{book_name} {cnum}"
+                    self.chapters.append((book_name, title, path, name))
+                    self._chapter_slice[idx] = (start, end)
+                    book_chapters.append({"title": title, "index": idx, "verses": []})
+            if book_chapters:
+                self._toc_books.append(
+                    {"title": book_name or f"Book {int(bid)}", "chapters": book_chapters}
+                )
+        return bool(self.chapters)
+
     def _extract_chapter_links(self, intro_path):
         """Extract chapter file links from a book introduction page.
 
@@ -2787,22 +2885,58 @@ document.addEventListener('click', function (e) {{
             result.append((text, href))
         return result
 
+    def _chapter_body(self, chapter_index):
+        """Return the annotated (data-vn tagged) body HTML for one chapter.
+
+        For anchor-sliced study Bibles this returns just that chapter's slice;
+        for normal EPUBs it returns the whole chapter file's body.
+        """
+        if not 0 <= chapter_index < len(self.chapters):
+            return ""
+        _, _, path, _ = self.chapters[chapter_index]
+        try:
+            with open(path, "rb") as f:
+                content = f.read().decode("utf-8", "replace")
+        except Exception:
+            return ""
+        sl = self._chapter_slice.get(chapter_index)
+        if sl:
+            content = content[sl[0]:sl[1]]
+        body = self._annotate_verses(self._extract_body(content))
+        return self._inject_first_verse(body)
+
+    def _inject_first_verse(self, body):
+        """Tag the implicit verse 1 in study Bibles where only the chapter number
+        appears at the start of a chapter (no explicit '1' marker)."""
+        if re.search(r'data-vn="1"', body):
+            return body
+        return re.sub(
+            r'(<span class="chapter-num">\s*\d+\s*</span>)',
+            r'\1<span class="v" data-vn="1">1 </span>',
+            body,
+            count=1,
+            flags=re.I,
+        )
+
     def _fill_verse_numbers(self, chapter_index):
-        """Populate verse list and reference/commentary map for a chapter."""
+        """Populate the verse list for a chapter (fast; refs are lazy)."""
         if chapter_index in self._chapter_verses:
             return
         if not 0 <= chapter_index < len(self.chapters):
             return
-        _, _, path, _ = self.chapters[chapter_index]
-        try:
-            with open(path, "rb") as f:
-                raw = f.read()
-            content = raw.decode("utf-8")
-        except Exception:
-            return
-        body = self._annotate_verses(self._extract_body(content))
+        body = self._chapter_body(chapter_index)
         numbers = sorted({int(n) for n in re.findall(r'data-vn="(\d+)"', body)})
         self._chapter_verses[chapter_index] = numbers
+
+    def _ensure_chapter_refs(self, chapter_index):
+        """Lazily compute the per-verse reference/commentary map for a chapter."""
+        if chapter_index in self._chapter_refs:
+            return
+        if not 0 <= chapter_index < len(self.chapters):
+            self._chapter_refs[chapter_index] = {}
+            return
+        _, _, path, _ = self.chapters[chapter_index]
+        body = self._chapter_body(chapter_index)
         self._chapter_refs[chapter_index] = self._extract_refs(body, os.path.dirname(path))
 
     def _extract_refs(self, body, chapter_dir):
@@ -2815,29 +2949,54 @@ document.addEventListener('click', function (e) {{
         anchor_re = re.compile(
             r'data-vn="(\d+)"|<a\b([^>]*?)>(.*?)</a>', re.I | re.S
         )
-        id_re = re.compile(r'id="([^"]+)"', re.I)
         refs = {}
         current = None
-        target_cache = {}
 
         def attr(attrs, name):
             m = re.search(name + r'="([^"]*)"', attrs or "", re.I)
             return m.group(1) if m else ""
 
-        def text_from(html, want_id):
-            m = id_re.search("id=\"" + re.escape(want_id) + "\"", html)
+        def clean(seg):
+            seg = re.sub(r"<[^>]+>", " ", seg)
+            seg = html.unescape(seg)
+            return re.sub(r"\s+", " ", seg).strip()
+
+        def text_from(src, want_id):
+            m = re.search(r'id="' + re.escape(want_id) + r'"', src)
             if not m:
                 return ""
-            seg = html[m.end():m.end() + 800]
-            close = re.search(r"</a>|<br\s*/?>", seg, re.I)
-            if close:
-                seg = seg[:close.start()]
-            text = re.sub(r"<[^>]+>", " ", seg)
-            return re.sub(r"\s+", " ", text).strip()
+            pos = m.end()
+            gt = src.find(">", pos)
+            body_from = (gt + 1) if gt != -1 and gt < pos + 400 else pos
+            # Crossref entry: just this letter's refs until the next letter/verse.
+            if re.match(r"c\d+\.\w", want_id):
+                seg = src[body_from:body_from + 1200]
+                stop = re.search(r'<span class="crossref-|</p>|<h\d', seg)
+                if stop:
+                    seg = seg[:stop.start()]
+                return clean(seg)
+            # Study note / generic: capture the enclosing block element.
+            block_start = max(
+                src.rfind("<p", 0, m.start()),
+                src.rfind("<div", 0, m.start()),
+                src.rfind("<li", 0, m.start()),
+                src.rfind("<blockquote", 0, m.start()),
+            )
+            if block_start == -1:
+                block_start = m.start()
+            tagm = re.match(r"<(\w+)", src[block_start:])
+            tag = tagm.group(1) if tagm else "p"
+            close = src.find("</" + tag + ">", body_from)
+            if close == -1:
+                block_end = body_from + 2500
+            else:
+                block_end = close
+            seg = src[block_start:block_end]
+            return clean(seg)[:2500]
 
         def resolve_text(href, title):
             if title:
-                return title
+                return html.unescape(title).strip()
             if not href or href.startswith("http") or href.startswith("mailto"):
                 return ""
             file_part, _, frag = href.partition("#")
@@ -2845,37 +3004,36 @@ document.addEventListener('click', function (e) {{
                 return ""
             if not file_part:
                 return text_from(body, frag)
-            # cross-file: look inside the extracted sibling file
             fname = os.path.normpath(os.path.join(chapter_dir, file_part))
-            html = target_cache.get(fname)
-            if html is None:
+            src = self._item_text_cache.get(fname)
+            if src is None:
                 try:
                     with open(fname, "rb") as f:
-                        html = f.read().decode("utf-8", "replace")
+                        src = f.read().decode("utf-8", "replace")
                 except Exception:
-                    html = ""
-                target_cache[fname] = html
-            return text_from(html, frag)
+                    src = ""
+                self._item_text_cache[fname] = src
+            return text_from(src, frag)
 
         for m in anchor_re.finditer(body):
             if m.group(1) is not None:
                 current = int(m.group(1))
                 continue
             attrs, inner = m.group(2), m.group(3)
-            label = re.sub(r"<[^>]+>", "", inner).strip()
+            label = html.unescape(re.sub(r"<[^>]+>", "", inner)).strip()
             title = attr(attrs, "title")
             href = attr(attrs, "href")
-            if not label and not title and not href:
-                continue
-            # Only treat as a reference if it links somewhere or has a note.
-            if not title and not (href and "#" in href):
-                continue
             if current is None:
+                continue
+            if not title and not (href and "#" in href):
                 continue
             text = resolve_text(href, title)
             if not text:
                 continue
-            refs.setdefault(current, []).append({"label": label, "text": text})
+            entry = {"label": label, "text": text}
+            lst = refs.setdefault(current, [])
+            if not any(x["label"] == label and x["text"] == text for x in lst):
+                lst.append(entry)
         return refs
 
 
@@ -3102,19 +3260,10 @@ document.addEventListener('click', function (e) {{
         self.title_label.set_text(title)
         self.progress_label.set_text(f"{index + 1}/{len(self.chapters)}")
 
-        with open(path, "rb") as f:
-            raw = f.read()
-        try:
-            content = raw.decode("utf-8")
-        except UnicodeDecodeError:
-            content = raw.decode("latin-1", "replace")
-
-        body_content = self._split_verses_into_lines(
-            self._annotate_verses(self._extract_body(content))
-        )
+        body_content = self._split_verses_into_lines(self._chapter_body(index))
         base_url = "file://" + os.path.dirname(path) + "/"
 
-        html = f"""<!doctype html><html><head><meta charset="utf-8">
+        page_html = f"""<!doctype html><html><head><meta charset="utf-8">
 {self._styles()}
 <script>{PAGE_JS}</script>
 </head><body>
@@ -3127,7 +3276,7 @@ document.addEventListener('click', function (e) {{
         self._fill_verse_numbers(index)
         self._refs_pinned = None
         self._show_spinner(True)
-        self.webview.load_html(html, base_url)
+        self.webview.load_html(page_html, base_url)
         return False
 
     # ---------------- Load events ----------------
