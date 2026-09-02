@@ -45,6 +45,7 @@ class OmarchyReader(Gtk.Application):
         self._search_results = []
         self._pending_verse = 0
         self._refs_panel_height = 240
+        self._search_panel_height = 300
         self._refs_tab = "notes"
         self._ref_tab_buttons = {}
         self.font_size = 18
@@ -924,14 +925,30 @@ class OmarchyReader(Gtk.Application):
         else:
             self._show_refs()
 
+    def _position_bottom_panels(self):
+        """Stack the bottom-anchored panels: search (bottom) · Personal Space ·
+        Resources (top). Each sits just above whichever lower panels are visible,
+        so they never overlap and the search bar is always at the very bottom."""
+        search_h = (
+            self._search_panel_height
+            if self._search_overlay is not None and self._search_overlay.get_visible()
+            else 0
+        )
+        notes_h = (
+            self._note_panel_height
+            if self._notes_overlay is not None and self._notes_overlay.get_visible()
+            else 0
+        )
+        if self._search_overlay is not None:
+            self._search_overlay.set_margin_bottom(0)
+        if self._notes_overlay is not None:
+            self._notes_overlay.set_margin_bottom(search_h)
+        if self._refs_overlay is not None:
+            self._refs_overlay.set_margin_bottom(search_h + notes_h)
+
     def _position_refs_above_notes(self):
-        """Stack the refs panel directly above the notes strip when both are open."""
-        if self._refs_overlay is None:
-            return
-        if self._notes_overlay is not None and self._notes_overlay.get_visible():
-            self._refs_overlay.set_margin_bottom(self._note_panel_height)
-        else:
-            self._refs_overlay.set_margin_bottom(0)
+        # Back-compatible alias; kept so existing call sites still work.
+        self._position_bottom_panels()
 
     def _ref_placeholder(self, text):
         lbl = Gtk.Label(label=text)
@@ -1714,47 +1731,52 @@ class OmarchyReader(Gtk.Application):
 
     # ---------------- Search ("Go to passage") ----------------
     def _build_search_overlay(self):
+        # A bottom bar: the input sits at the very bottom and the suggestion
+        # list grows upward above it.
         self._search_overlay = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         self._search_overlay.set_visible(False)
-        self._search_overlay.set_halign(Gtk.Align.CENTER)
-        self._search_overlay.set_valign(Gtk.Align.CENTER)
-        self._search_overlay.set_size_request(460, -1)
+        self._search_overlay.set_halign(Gtk.Align.FILL)
+        self._search_overlay.set_valign(Gtk.Align.END)
+        self._search_overlay.set_size_request(-1, self._search_panel_height)
         self._search_overlay.get_style_context().add_class("search-overlay")
-
-        self._search_entry = Gtk.Entry()
-        self._search_entry.set_placeholder_text("Go to…  e.g. John 3:16, ps 23, Genesis")
-        self._search_entry.set_has_frame(True)
-        self._search_entry.connect("changed", self._on_search_changed)
-        self._search_entry.connect("key-press-event", self._on_search_key)
-        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
-        box.pack_start(self._search_entry, False, False, 0)
 
         self._search_list = Gtk.ListBox()
         self._search_list.set_selection_mode(Gtk.SelectionMode.SINGLE)
         self._search_list.connect("row-activated", self._on_search_row_activated)
-        self._search_list.set_vexpand(True)
-        scroller = Gtk.ScrolledWindow()
-        scroller.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
-        scroller.set_size_request(-1, 260)
-        scroller.add(self._search_list)
-        box.pack_start(scroller, True, True, 0)
+        list_scroll = Gtk.ScrolledWindow()
+        list_scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        list_scroll.set_vexpand(True)
+        list_scroll.add(self._search_list)
+        self._search_overlay.pack_start(list_scroll, True, True, 0)
 
-        hint = Gtk.Label(label="Type a book or reference · ↑/↓ select · Enter go · Esc close")
+        # Input row (bottom of the bar).
+        row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        row.set_margin_start(16)
+        row.set_margin_end(16)
+        row.set_margin_top(6)
+        row.set_margin_bottom(8)
+        prefix = Gtk.Label(label="⌕")
+        prefix.get_style_context().add_class("title-label")
+        row.pack_start(prefix, False, False, 0)
+        self._search_entry = Gtk.Entry()
+        self._search_entry.set_placeholder_text("Go to…  e.g. John 3:16, ps 23, Genesis")
+        self._search_entry.set_has_frame(False)
+        self._search_entry.connect("changed", self._on_search_changed)
+        self._search_entry.connect("key-press-event", self._on_search_key)
+        row.pack_start(self._search_entry, True, True, 0)
+        hint = Gtk.Label(label="↑/↓ select · Enter go · Esc close")
         hint.get_style_context().add_class("progress-label")
-        hint.set_margin_top(6)
-        box.pack_start(hint, False, False, 0)
-
-        self._search_overlay.pack_start(box, False, False, 0)
+        row.pack_start(hint, False, False, 0)
+        self._search_overlay.pack_start(row, False, False, 0)
 
     def _open_search(self):
         if not self.book_path or not self.chapters:
             return
-        self._hide_notes()
-        self._hide_refs()
         self._hide_settings()
         self._hide_help()
         self._search_overlay.show_all()
         self._search_overlay.set_visible(True)
+        self._position_bottom_panels()
         self._search_entry.set_text("")
         self._run_search("")
         self._search_entry.grab_focus()
@@ -1763,6 +1785,7 @@ class OmarchyReader(Gtk.Application):
     def _close_search(self):
         if self._search_overlay is not None:
             self._search_overlay.set_visible(False)
+            self._position_bottom_panels()
 
     def _run_search(self, text):
         for r in self._search_list.get_children():
@@ -1986,14 +2009,15 @@ class OmarchyReader(Gtk.Application):
             }}
             .search-overlay {{
                 background-color: alpha({THEME["background"]}, 0.98);
-                border: 1px solid rgba(255,255,255,0.15);
-                border-radius: 12px;
-                padding: 8px;
+                border-top: 1px solid rgba(255,255,255,0.15);
             }}
             .search-overlay entry {{
                 font-size: {self.font_size}px;
-                padding: 8px 10px;
-                border-radius: 8px;
+                background: transparent;
+                border: none;
+                box-shadow: none;
+                padding: 4px 2px;
+                color: {THEME["foreground"]};
             }}
             .search-overlay row:selected {{
                 background-color: alpha({THEME["accent"]}, 0.35);
