@@ -44,6 +44,10 @@ class OmarchyReader(Gtk.Application):
         self._search_list = None
         self._search_results = []
         self._search_alloc_height = 0
+        self._dock = None
+        self._mode_line = None
+        self._mode_chips = None
+        self._mode_hint = None
         self._pending_verse = 0
         self._refs_panel_height = 240
         self._search_panel_height = 300
@@ -251,14 +255,6 @@ class OmarchyReader(Gtk.Application):
         self._build_toc_overlay()
         self.loading_overlay_win.add_overlay(self.toc_overlay)
 
-        # Notes overlay (hidden until toggled).
-        self._build_notes_overlay()
-        self.loading_overlay_win.add_overlay(self._notes_overlay)
-
-        # References panel (study notes; hidden until Ctrl+R).
-        self._build_refs_overlay()
-        self.loading_overlay_win.add_overlay(self._refs_overlay)
-
         # Settings overlay (hidden until toggled).
         self._build_settings_overlay()
         self.loading_overlay_win.add_overlay(self._settings_overlay)
@@ -267,9 +263,14 @@ class OmarchyReader(Gtk.Application):
         self._build_help_overlay()
         self.loading_overlay_win.add_overlay(self._help_overlay)
 
-        # Search overlay (opened with "/").
+        # Bottom dock holds the Personal Space, Resources and Search panels
+        # plus the always-visible mode line. Built as a single overlay child so
+        # GTK stacks them automatically (no manual margin math).
+        self._build_notes_overlay()
+        self._build_refs_overlay()
         self._build_search_overlay()
-        self.loading_overlay_win.add_overlay(self._search_overlay)
+        self._build_dock()
+        self.loading_overlay_win.add_overlay(self._dock)
 
         self.window = win
         win.add(self.loading_overlay_win)
@@ -288,6 +289,7 @@ class OmarchyReader(Gtk.Application):
         self._settings_overlay.set_visible(False)
         self._help_overlay.set_visible(False)
         self._search_overlay.set_visible(False)
+        self._dock.set_visible(False)
         # Re-apply header visibility (show_all() blindly re-shows everything).
         if SETTINGS.get("auto_hide_header", True):
             self.headerbar.set_visible(False)
@@ -566,6 +568,85 @@ class OmarchyReader(Gtk.Application):
                 self.toc_list.grab_focus()
             return
         self._hide_toc()
+
+    # ---------------- Bottom dock + mode line ----------------
+    def _build_dock(self):
+        # One overlay child; GTK stacks its panels top-to-bottom and the mode
+        # line is always the bottom row.
+        self._dock = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        self._dock.set_halign(Gtk.Align.FILL)
+        self._dock.set_valign(Gtk.Align.END)
+        self._dock.set_visible(False)
+        self._dock.get_style_context().add_class("dock")
+        for panel in (self._refs_overlay, self._notes_overlay, self._search_overlay):
+            panel.set_hexpand(True)
+            self._dock.pack_start(panel, False, False, 0)
+        self._build_mode_line()
+
+    def _build_mode_line(self):
+        ml = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
+        ml.get_style_context().add_class("modeline")
+        self._mode_chips = {}
+        for key, label in (
+            ("content", " CONTENT "),
+            ("notes", " PERSONAL SPACE "),
+            ("refs", " RESOURCES "),
+        ):
+            lbl = Gtk.Label(label=label)
+            lbl.get_style_context().add_class("modeline-chip")
+            eb = Gtk.EventBox()
+            eb.add(lbl)
+            eb.connect("button-press-event", self._on_mode_chip, key)
+            ml.pack_start(eb, False, False, 0)
+            self._mode_chips[key] = lbl
+        sp = Gtk.Box()
+        sp.set_hexpand(True)
+        ml.pack_start(sp, True, True, 0)
+        self._mode_hint = Gtk.Label(label="")
+        self._mode_hint.get_style_context().add_class("modeline-hint")
+        ml.pack_end(self._mode_hint, False, False, 0)
+        self._mode_line = ml
+        self._dock.pack_start(ml, False, False, 0)
+
+    def _on_mode_chip(self, widget, event, key):
+        if key == "content":
+            self._focus_content()
+        elif key == "notes":
+            if self._notes_overlay.get_visible():
+                self._focus_notes()
+            else:
+                self._show_notes()
+        elif key == "refs":
+            if self._refs_overlay.get_visible():
+                self._focus_refs()
+            else:
+                self._show_refs()
+        return True
+
+    def _set_section_frame(self, panel, active):
+        if panel is None:
+            return
+        ctx = panel.get_style_context()
+        if active:
+            ctx.add_class("section-active")
+        else:
+            ctx.remove_class("section-active")
+
+    def _update_mode_line(self):
+        if not hasattr(self, "_mode_chips") or self._mode_chips is None:
+            return
+        for key, lbl in self._mode_chips.items():
+            ctx = lbl.get_style_context()
+            if key == self._focus:
+                ctx.add_class("modeline-chip-active")
+            else:
+                ctx.remove_class("modeline-chip-active")
+        # Accent frame on the focused dock panel (none when focus is content).
+        self._set_section_frame(self._notes_overlay, self._focus == "notes")
+        self._set_section_frame(self._refs_overlay, self._focus == "refs")
+        self._set_section_frame(self._search_overlay, False)
+        if hasattr(self, "_mode_hint"):
+            self._mode_hint.set_text(self._context_hint())
 
     # ---------------- Notes ----------------
     def _build_notes_overlay(self):
@@ -927,37 +1008,17 @@ class OmarchyReader(Gtk.Application):
             self._show_refs()
 
     def _position_bottom_panels(self):
-        """Stack the bottom-anchored panels: search (bottom) · Personal Space ·
-        Resources (top). Each sits just above whichever lower panels are visible,
-        so they never overlap and the search bar is always at the very bottom."""
-        search_h = (
-            getattr(self, "_search_alloc_height", 0)
-            if self._search_overlay is not None and self._search_overlay.get_visible()
-            else 0
-        )
-        notes_h = (
-            self._note_panel_height
-            if self._notes_overlay is not None and self._notes_overlay.get_visible()
-            else 0
-        )
-        if self._search_overlay is not None:
-            self._search_overlay.set_margin_bottom(0)
-        if self._notes_overlay is not None:
-            self._notes_overlay.set_margin_bottom(search_h)
-        if self._refs_overlay is not None:
-            self._refs_overlay.set_margin_bottom(search_h + notes_h)
+        """Layout is now handled by the dock box; just refresh the focus chrome."""
+        self._update_mode_line()
 
     def _on_search_alloc(self, widget, alloc):
-        # The search bar hugs its content; when its height changes (as results
-        # grow/shrink), lift the panels above it to match.
-        h = alloc.height
-        if getattr(self, "_search_alloc_height", 0) != h:
-            self._search_alloc_height = h
-            self._position_bottom_panels()
+        # Search hugs its content; nothing else needs re-stacking because the
+        # dock lays panels out automatically. Keep the hook cheap.
+        self._update_mode_line()
 
     def _position_refs_above_notes(self):
         # Back-compatible alias; kept so existing call sites still work.
-        self._position_bottom_panels()
+        self._update_mode_line()
 
     def _ref_placeholder(self, text):
         lbl = Gtk.Label(label=text)
@@ -1898,6 +1959,38 @@ class OmarchyReader(Gtk.Application):
             .toc-overlay row:selected .toc-current {{
                 color: {THEME["background"]};
             }}
+            .dock {{
+                background-color: alpha({THEME["background"]}, 0.99);
+                border-top: 1px solid rgba(255,255,255,0.15);
+            }}
+            .modeline {{
+                background-color: {THEME["background"]};
+                border-top: 1px solid rgba(255,255,255,0.10);
+            }}
+            .modeline-chip {{
+                color: {THEME["muted"]};
+                padding: 4px 10px;
+                font-size: 12px;
+                font-weight: bold;
+            }}
+            .modeline-chip:hover {{
+                color: {THEME["foreground"]};
+            }}
+            .modeline-chip-active {{
+                background-color: {THEME["accent"]};
+                color: {THEME["background"]};
+            }}
+            .modeline-hint {{
+                color: {THEME["muted"]};
+                font-size: 12px;
+                padding: 0 12px;
+            }}
+            .notes-overlay.section-active,
+            .refs-overlay.section-active,
+            .search-overlay.section-active {{
+                border-left: 3px solid {THEME["accent"]};
+                background-color: alpha({THEME["background"]}, 0.92);
+            }}
             .notes-overlay {{
                 background-color: alpha({THEME["background"]}, 0.97);
                 border-top: 1px solid rgba(255,255,255,0.15);
@@ -2171,6 +2264,7 @@ class OmarchyReader(Gtk.Application):
         return " · ".join(tips) or "Ctrl+P notes · Ctrl+R refs · Ctrl+T contents"
 
     def _update_header_focus(self):
+        self._update_mode_line()
         if not hasattr(self, "_focus_label") or self._focus_label is None:
             return
         home = getattr(self, "_on_home", False)
@@ -2235,6 +2329,8 @@ class OmarchyReader(Gtk.Application):
             self._refs_overlay.set_visible(False)
         self._hide_settings()
         self._hide_help()
+        if self._dock is not None:
+            self._dock.set_visible(False)
         self._on_home = True
         self._home_options = []
         state = load_state()
@@ -2564,6 +2660,8 @@ document.addEventListener('click', function (e) {{
             # as soon as the chapter finishes loading.
             self._focus = "content"
             self._active_section = "content"
+            if self._dock is not None:
+                self._dock.set_visible(True)
             self.webview.grab_focus()
             self._update_header_focus()
 
