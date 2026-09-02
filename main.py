@@ -59,6 +59,7 @@ class OmarchyReader(Gtk.Application):
         self._notes_overlay = None
         self._note_panel_height = 300
         self._ps_tab = "notes"
+        self._ps_editing = False     # False = navigate mode (keys act), True = typing
         self._ps_tabs = {}
         self._ps_stack = None
         self._active_section = "content"
@@ -169,9 +170,11 @@ class OmarchyReader(Gtk.Application):
         hb.set_show_close_button(True)
         hb.set_custom_title(self._title_label())
 
-        open_btn = Gtk.Button(label="Open Book")
-        open_btn.connect("clicked", self.on_open)
-        hb.pack_start(open_btn)
+        # Focus indicator lives where "Open Book" used to be (left side).
+        self._focus_label = Gtk.Label(label="")
+        self._focus_label.get_style_context().add_class("focus-badge")
+        self._focus_label.set_visible(False)
+        hb.pack_start(self._focus_label)
 
         self.progress_label = Gtk.Label(label="")
         self.progress_label.get_style_context().add_class("progress-label")
@@ -275,6 +278,8 @@ class OmarchyReader(Gtk.Application):
         # Re-apply header visibility (show_all() blindly re-shows everything).
         if SETTINGS.get("auto_hide_header", True):
             self.headerbar.set_visible(False)
+
+        self._update_header_focus()
 
     def _build_toc_overlay(self):
         """Build the chapter-list overlay ("Table of Contents")."""
@@ -853,6 +858,11 @@ class OmarchyReader(Gtk.Application):
                 return
             if w is notes:
                 self._focus = "notes"
+                # Editing iff a text field (not the tab button) has focus.
+                self._ps_editing = widget in (
+                    getattr(self, "notes_textview", None),
+                    getattr(self, "prayer_entry", None),
+                )
                 self._update_header_focus()
                 return
             w = w.get_parent()
@@ -1187,6 +1197,7 @@ class OmarchyReader(Gtk.Application):
     def _hide_notes(self):
         self._notes_overlay.set_visible(False)
         self._notes_overlay.get_style_context().remove_class("panel-focused")
+        self._ps_editing = False
         self._position_refs_above_notes()
         if self._focus == "notes":
             self._focus = "content"
@@ -1198,7 +1209,7 @@ class OmarchyReader(Gtk.Application):
         self._update_header_focus()
 
     # ---------------- Personal Space tabs ----------------
-    def _set_ps_tab(self, key):
+    def _set_ps_tab(self, key, edit=False):
         if key not in self._ps_tabs:
             return
         self._ps_tab = key
@@ -1211,12 +1222,48 @@ class OmarchyReader(Gtk.Application):
                 ctx.remove_class("tab-active")
         if key == "notes":
             self._load_verse_note()
-            self.notes_textview.grab_focus()
         elif key == "prayer":
             self._refresh_prayer()
-            self.prayer_entry.grab_focus()
         elif key == "memory":
             self._refresh_memory()
+        # Focus model: by default we focus the tab BUTTON (navigate mode) so
+        # 1/2/3, Tab and i work. Only in "edit" mode do we move focus into the
+        # text field (so typing goes there instead of switching tabs).
+        field = self._ps_text_field(key)
+        if edit and field is not None:
+            field.grab_focus()
+        else:
+            self._ps_tabs[key].grab_focus()
+
+    def _ps_text_field(self, key):
+        if key == "notes":
+            return self.notes_textview
+        if key == "prayer":
+            return self.prayer_entry
+        return None  # memory has no text field
+
+    def _enter_ps_edit(self):
+        field = self._ps_text_field(self._ps_tab)
+        if field is not None:
+            field.grab_focus()
+            self._ps_editing = True
+            self._update_header_focus()
+            return True
+        return False
+
+    def _exit_ps_edit(self):
+        self._ps_editing = False
+        btn = self._ps_tabs.get(self._ps_tab)
+        if btn is not None:
+            btn.grab_focus()
+        self._update_header_focus()
+
+    def _cycle_ps_tab(self, delta):
+        order = list(self._ps_tabs.keys())
+        if not order:
+            return
+        idx = order.index(self._ps_tab) if self._ps_tab in order else 0
+        self._set_ps_tab(order[(idx + delta) % len(order)], edit=self._ps_editing)
 
     def _refresh_notes(self):
         """Refresh whichever Personal Space tab is currently active."""
@@ -1938,18 +1985,13 @@ class OmarchyReader(Gtk.Application):
         self.title_label.get_style_context().add_class("title-label")
         box.pack_start(self.title_label, False, False, 0)
 
-        self._focus_label = Gtk.Label(label="")
-        self._focus_label.get_style_context().add_class("focus-badge")
-        self._focus_label.set_visible(False)
-        box.pack_start(self._focus_label, False, False, 0)
-
+        # Contextual tip sits next to the title (focus badge is on the left).
         self._hint_label = Gtk.Label(label="")
         self._hint_label.get_style_context().add_class("progress-label")
         self._hint_label.set_visible(False)
         box.pack_start(self._hint_label, False, False, 0)
 
         self._header_box = box
-        self._update_header_focus()
         return box
 
     _FOCUS_NAMES = {"content": "Content", "notes": "Personal Space", "refs": "Resources"}
@@ -1961,7 +2003,9 @@ class OmarchyReader(Gtk.Application):
         if home or not self.chapters:
             return "Enter open · i import · x remove"
         if f == "notes":
-            return "Ctrl+J back to content · Ctrl+Enter add note · 1-3 tabs"
+            if self._ps_editing:
+                return "Esc back to keys · Ctrl+Enter add note · Ctrl+K to content"
+            return "Tab or 1-3 switch tabs · i edit · Ctrl+K to content"
         if f == "refs":
             return "Ctrl+J content · 1-5 tabs · j/k scroll · h/l tabs"
         # content
@@ -2555,7 +2599,11 @@ document.addEventListener('click', function (e) {{
         # do not break hotkeys (e.g. Ctrl+L arriving as keyval "L").
         if kn == "escape":
             if self._notes_overlay.get_visible():
-                self._hide_notes()
+                # In edit mode, Escape returns to navigate mode; otherwise close.
+                if self._ps_editing:
+                    self._exit_ps_edit()
+                else:
+                    self._hide_notes()
                 return True
             if self._refs_overlay is not None and self._refs_overlay.get_visible():
                 self._hide_refs()
@@ -2723,6 +2771,25 @@ document.addEventListener('click', function (e) {{
                 if key:
                     self._set_ps_tab(key)
                     return True
+
+        # Personal Space "navigate" mode (focus is a tab button, not typing):
+        # Tab / Shift-Tab cycle tabs, i enters the text field, h/l also switch.
+        if self._focus == "notes" and not self._ps_editing:
+            if not ctrl and kn == "i":
+                self._enter_ps_edit()
+                return True
+            if kn == "tab":
+                self._cycle_ps_tab(-1 if shift else 1)
+                return True
+            if kn == "backtab":
+                self._cycle_ps_tab(-1)
+                return True
+            if not ctrl and kn == "l":
+                self._cycle_ps_tab(1)
+                return True
+            if not ctrl and kn == "h":
+                self._cycle_ps_tab(-1)
+                return True
 
         # When the Resources panel is focused, j/k (and arrows) scroll it and
         # h/l switch tabs — without touching where you are in the content.
