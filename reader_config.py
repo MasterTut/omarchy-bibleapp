@@ -16,6 +16,8 @@ DATA_DIR = os.path.expanduser("~/.config/omarchy-bible")
 STATE_PATH = os.path.join(DATA_DIR, "state.json")
 NOTES_PATH = os.path.join(DATA_DIR, "notes.json")
 SETTINGS_PATH = os.path.join(DATA_DIR, "settings.json")
+PRAYERS_PATH = os.path.join(DATA_DIR, "prayers.json")
+MEMORY_PATH = os.path.join(DATA_DIR, "memory.json")
 
 # Fallback palette (Ash) used when the live omarchy theme cannot be read.
 DEFAULT_THEME = {
@@ -204,12 +206,48 @@ def save_notes(notes):
         pass
 
 
+def _load_list(path):
+    """Load a JSON file that holds a list; return [] on any problem."""
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+        return data if isinstance(data, list) else []
+    except Exception:
+        return []
+
+
+def _save_list(path, items):
+    _ensure_data_dir()
+    try:
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(items, fh, indent=2)
+    except Exception:
+        pass
+
+
+def load_prayers():
+    return _load_list(PRAYERS_PATH)
+
+
+def save_prayers(items):
+    _save_list(PRAYERS_PATH, items)
+
+
+def load_memory():
+    return _load_list(MEMORY_PATH)
+
+
+def save_memory(items):
+    _save_list(MEMORY_PATH, items)
+
+
 # ---------------- Settings persistence ----------------
 
 DEFAULT_SETTINGS = {
     "auto_hide_header": True,
     "auto_hide_notes": True,
     "note_panel_height": 300,
+    "show_personal_space": True,
 }
 
 SETTINGS = dict(DEFAULT_SETTINGS)
