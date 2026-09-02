@@ -5,6 +5,7 @@ import html
 import os
 import re
 import sys
+import shlex
 import threading
 import zipfile
 import json
@@ -17,8 +18,9 @@ import gi
 
 gi.require_version("Gtk", "3.0")
 gi.require_version("WebKit2", "4.1")
+gi.require_version("GdkPixbuf", "2.0")
 
-from gi.repository import Gtk, Gio, GLib, Gdk, WebKit2
+from gi.repository import Gtk, Gio, GLib, Gdk, GdkPixbuf, WebKit2
 import ebooklib
 from ebooklib import epub
 
@@ -867,6 +869,9 @@ class OmarchyReader(Gtk.Application):
         self._refs_overlay = None
         self._refs_pinned = None
         self._refs_panel_height = 240
+        self._refs_tab = "notes"
+        self._ref_tab_buttons = {}
+        self._book_res = {}
         self.chapter_index = 0
         self.current_page = 0
         self.current_ch = 0
@@ -1393,7 +1398,7 @@ class OmarchyReader(Gtk.Application):
         self._apply_note_height(SETTINGS.get("note_panel_height", 300))
 
     def _build_refs_overlay(self):
-        """Build the reference/commentary panel (a strip above the notes)."""
+        """Build the tabbed Resources panel (a strip above the notes)."""
         self._refs_overlay = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         self._refs_overlay.set_visible(False)
         self._refs_overlay.set_halign(Gtk.Align.FILL)
@@ -1407,10 +1412,10 @@ class OmarchyReader(Gtk.Application):
         bar.set_margin_top(10)
         bar.set_margin_bottom(6)
 
-        title = Gtk.Label(label="References")
+        title = Gtk.Label(label="Resources")
         title.get_style_context().add_class("title-label")
         title.set_halign(Gtk.Align.START)
-        bar.pack_start(title, True, True, 0)
+        bar.pack_start(title, False, False, 0)
 
         self.refs_loc = Gtk.Label(label="")
         self.refs_loc.get_style_context().add_class("progress-label")
@@ -1420,18 +1425,55 @@ class OmarchyReader(Gtk.Application):
         close.connect("clicked", lambda *_: self._hide_refs())
         bar.pack_end(close, False, False, 0)
 
+        self._refs_overlay.pack_start(bar, False, False, 0)
+
+        # Tab bar: Notes · Cross-refs · Introduction · Images · Links.
+        tabs = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        tabs.set_margin_start(16)
+        tabs.set_margin_end(16)
+        tabs.set_margin_bottom(8)
+        self._ref_tab_buttons = {}
+        for key, label in (
+            ("notes", "Notes"),
+            ("crossrefs", "Cross-refs"),
+            ("intro", "Introduction"),
+            ("images", "Images"),
+            ("links", "Links"),
+        ):
+            btn = Gtk.Button(label=label)
+            btn.set_relief(Gtk.ReliefStyle.NONE)
+            btn.connect("clicked", lambda _b, k=key: self._set_ref_tab(k))
+            tabs.pack_start(btn, False, False, 0)
+            self._ref_tab_buttons[key] = btn
+        self._refs_overlay.pack_start(tabs, False, False, 0)
+
         self._refs_body = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
         self._refs_body.set_margin_start(16)
         self._refs_body.set_margin_end(16)
         self._refs_body.set_margin_bottom(12)
         scroller = Gtk.ScrolledWindow()
-        scroller.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        scroller.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
         scroller.set_vexpand(True)
         scroller.add(self._refs_body)
         scroller.get_style_context().add_class("refs-scroller")
 
-        self._refs_overlay.pack_start(bar, False, False, 0)
         self._refs_overlay.pack_start(scroller, True, True, 0)
+
+    def _set_ref_tab(self, key):
+        if key not in self._ref_tab_buttons:
+            return
+        if key != "notes":
+            self._refs_pinned = None
+        self._refs_tab = key
+        self._refresh_refs()
+
+    def _sync_ref_tab_buttons(self):
+        for key, btn in self._ref_tab_buttons.items():
+            ctx = btn.get_style_context()
+            if key == self._refs_tab:
+                ctx.add_class("tab-active")
+            else:
+                ctx.remove_class("tab-active")
 
     def _show_refs(self):
         if not self.book_path or not self.chapters:
@@ -1461,61 +1503,110 @@ class OmarchyReader(Gtk.Application):
         else:
             self._refs_overlay.set_margin_bottom(0)
 
+    def _ref_placeholder(self, text):
+        lbl = Gtk.Label(label=text)
+        lbl.get_style_context().add_class("progress-label")
+        lbl.set_halign(Gtk.Align.START)
+        lbl.set_xalign(0.0)
+        lbl.set_line_wrap(True)
+        self._refs_body.pack_start(lbl, False, False, 0)
+
+    def _ref_card(self, label, text):
+        card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        card.get_style_context().add_class("ref-card")
+        if label:
+            head = Gtk.Label(label=f"[{label}]")
+            head.get_style_context().add_class("toc-current")
+            head.set_halign(Gtk.Align.START)
+            card.pack_start(head, False, False, 0)
+        body = Gtk.Label(label=text)
+        body.set_halign(Gtk.Align.START)
+        body.set_xalign(0.0)
+        body.set_line_wrap(True)
+        body.set_selectable(True)
+        card.pack_start(body, False, False, 0)
+        self._refs_body.pack_start(card, False, False, 0)
+
+    def _open_uri(self, uri):
+        """Open a file:// or http(s) URI with the system default handler."""
+        try:
+            if hasattr(Gtk, "show_uri_on_window"):
+                Gtk.show_uri_on_window(self.window, uri, Gdk.CURRENT_TIME)
+            else:
+                Gio.AppInfo.launch_default_for_uri(uri, None)
+        except Exception:
+            GLib.spawn_command_line_async(f"xdg-open {shlex.quote(uri)}")
+
     def _refresh_refs(self):
-        """Re-render the reference panel for the currently highlighted verse."""
+        """Re-render the Resources panel for the current tab + verse."""
         if self._refs_overlay is None or not self._refs_overlay.get_visible():
             return
-        # Compute per-verse references lazily the first time the panel is shown
-        # for a chapter (this can read the study-notes / crossrefs companions).
         if self.chapter_index not in self._chapter_refs:
             self._ensure_chapter_refs(self.chapter_index)
         for child in self._refs_body.get_children():
             self._refs_body.remove(child)
 
-        chapter_refs = self._chapter_refs.get(self.chapter_index, {})
+        tab = self._refs_tab
         verse = getattr(self, "_current_verse", 0)
+        book_name = self.chapters[self.chapter_index][0] if 0 <= self.chapter_index < len(self.chapters) else ""
 
-        if verse:
-            self.refs_loc.set_text(f"v. {verse}")
+        if tab in ("notes", "crossrefs"):
+            self.refs_loc.set_text(f"{book_name} · v. {verse}" if verse else book_name)
+            if self._refs_pinned is not None and tab == "notes":
+                entries = [self._refs_pinned]
+            elif verse:
+                want = "crossrefs" if tab == "crossrefs" else "notes"
+                allrefs = self._chapter_refs.get(self.chapter_index, {})
+                entries = [e for e in allrefs.get(verse, []) if e.get("kind", "notes") == want]
+            else:
+                entries = []
+            if not entries:
+                self._ref_placeholder(
+                    "No references for this verse." if verse else "Select a verse with j/k."
+                )
+            else:
+                for e in entries:
+                    self._ref_card(e.get("label", ""), e.get("text", ""))
         else:
-            self.refs_loc.set_text("")
-
-        entries = []
-        if self._refs_pinned is not None:
-            entries = [self._refs_pinned]
-        elif verse:
-            entries = chapter_refs.get(verse, [])
-
-        if not entries:
-            placeholder = Gtk.Label(
-                label="No references for this verse."
-                if verse
-                else "Select a verse with j/k to see its references."
-            )
-            placeholder.get_style_context().add_class("progress-label")
-            placeholder.set_halign(Gtk.Align.START)
-            self._refs_body.pack_start(placeholder, False, False, 0)
-        else:
-            for e in entries:
-                card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
-                card.get_style_context().add_class("ref-card")
-                label = e.get("label", "")
-                head = Gtk.Label(label=f"[{label}] " if label else "")
-                head.get_style_context().add_class("toc-current")
-                head.set_halign(Gtk.Align.START)
-                text = Gtk.Label(label=e.get("text", ""))
-                text.set_halign(Gtk.Align.START)
-                text.set_xalign(0.0)
-                text.set_line_wrap(True)
-                text.set_selectable(True)
-                if label:
-                    card.pack_start(head, False, False, 0)
-                card.pack_start(text, False, False, 0)
-                self._refs_body.pack_start(card, False, False, 0)
+            intro, images, links = self._get_book_resources(self.chapter_index)
+            self.refs_loc.set_text(book_name)
+            if tab == "intro":
+                if intro.strip():
+                    self._ref_card("", intro)
+                else:
+                    self._ref_placeholder("No introduction for this book.")
+            elif tab == "images":
+                if not images:
+                    self._ref_placeholder("No images for this book.")
+                for im in images:
+                    cap = Gtk.Label(label=im.get("caption") or os.path.basename(im["path"]))
+                    cap.set_halign(Gtk.Align.START)
+                    cap.set_xalign(0.0)
+                    cap.set_line_wrap(True)
+                    self._refs_body.pack_start(cap, False, False, 0)
+                    btn = Gtk.Button()
+                    try:
+                        pix = GdkPixbuf.Pixbuf.new_from_file_at_scale(im["path"], 520, 400, True)
+                        btn.add(Gtk.Image.new_from_pixbuf(pix))
+                    except Exception:
+                        btn.add(Gtk.Label(label="(image unavailable)"))
+                    btn.connect(
+                        "clicked",
+                        lambda _b, p=im["path"]: self._open_uri("file://" + p),
+                    )
+                    self._refs_body.pack_start(btn, False, False, 0)
+            elif tab == "links":
+                if not links:
+                    self._ref_placeholder("No external links for this book.")
+                for lk in links:
+                    btn = Gtk.LinkButton(uri=lk["url"], label=lk["text"] or lk["url"])
+                    btn.set_halign(Gtk.Align.START)
+                    self._refs_body.pack_start(btn, False, False, 0)
 
         self._refs_overlay.show_all()
         self._refs_overlay.set_visible(True)
         self._position_refs_above_notes()
+        self._sync_ref_tab_buttons()
 
     def _apply_note_height(self, height):
         """Set the height of the notes panel and persist it to settings."""
@@ -2126,7 +2217,8 @@ class OmarchyReader(Gtk.Application):
         rows = [
             ("Ctrl + T", "Table of contents: books · chapters · verses (j/k, Enter, h/Back)"),
             ("Ctrl + N", "Notes panel (New button / Ctrl+Enter to add)"),
-            ("Ctrl + R", "Reference / commentary panel (shown above notes)"),
+            ("Ctrl + R", "Resources panel: Notes · Cross-refs · Intro · Images · Links"),
+            ("1 – 5", "Switch the Resources panel tab (when open)"),
             ("Ctrl + h", "Jump to notes list (works while typing)"),
             ("Ctrl + l", "Add a note / edit the highlighted note"),
             ("Ctrl + j / k", "Notes list: move highlight · elsewhere: cycle sections"),
@@ -2760,6 +2852,7 @@ document.addEventListener('click', function (e) {{
         self._chapter_refs = {}
         self._chapter_slice = {}
         self._item_text_cache = {}
+        self._book_res = {}
         if self.bookdir:
             shutil.rmtree(self.bookdir, ignore_errors=True)
         self.bookdir = tempfile.mkdtemp(prefix="omarchy-bible-")
@@ -3011,6 +3104,95 @@ document.addEventListener('click', function (e) {{
         body = self._chapter_body(chapter_index)
         self._chapter_refs[chapter_index] = self._extract_refs(body, os.path.dirname(path))
 
+    def _get_book_resources(self, chapter_index):
+        """Return (intro_text, images, links) for the book a chapter belongs to.
+
+        Reads the book's .intros.html companion (present in Crossway study
+        Bibles) and the chapter's own slice to collect the introduction text,
+        embedded images/maps/charts, and external web links. Cached per chapter.
+        """
+        if chapter_index in self._book_res:
+            return self._book_res[chapter_index]
+        empty = ("", [], [])
+        if not 0 <= chapter_index < len(self.chapters):
+            return empty
+        book_name, _, path, name = self.chapters[chapter_index]
+        intro_text, images, links = "", [], []
+
+        # Locate the book's intros file: same bNN. prefix, .intros.html suffix.
+        m = re.search(r'(b\d{2})\.(\d{2})\.', name)
+        intro_body = ""
+        intro_dir = ""
+        if m:
+            bid = m.group(1)
+            intro_name = None
+            for candidate in self._item_paths:
+                if re.search(rf'(?:^|/){bid}\.\d{{2}}\..+\.intros\.html$', candidate):
+                    intro_name = candidate
+                    break
+            if intro_name:
+                try:
+                    with open(self._item_paths[intro_name], "rb") as f:
+                        raw = f.read().decode("utf-8", "replace")
+                    intro_body = self._extract_body(raw)
+                    intro_text = self._html_to_text(intro_body)
+                    intro_dir = os.path.dirname(self._item_paths[intro_name])
+                except Exception:
+                    intro_body = ""
+
+            # Images from the intros page.
+            seen = set()
+            for im in re.finditer(r'<img[^>]*\bsrc="([^"]+)"', intro_body, flags=re.I):
+                src = im.group(1)
+                base = os.path.basename(src)
+                cand = os.path.normpath(os.path.join(intro_dir, src)) if intro_dir else ""
+                if not (cand and os.path.isfile(cand)):
+                    cand = next(
+                        (p for n, p in self._item_paths.items()
+                         if os.path.basename(n) == base),
+                        "",
+                    )
+                if cand and cand not in seen:
+                    seen.add(cand)
+                    images.append({"path": cand, "caption": base})
+
+            # External links across the whole book (intros + notes + refs).
+            link_seen = set()
+            scan_names = [
+                n for n in self._item_paths
+                if re.search(rf'(?:^|/){bid}\.\d{{2}}\..+\.(?:intros|studynotes|crossrefs)\.html$', n)
+            ]
+            for n in scan_names:
+                try:
+                    with open(self._item_paths[n], "rb") as f:
+                        txt = f.read().decode("utf-8", "replace")
+                except Exception:
+                    continue
+                for lm in re.finditer(
+                    r'<a[^>]*\bhref="(https?://[^"]+)"[^>]*>(.*?)</a>', txt, flags=re.I | re.S
+                ):
+                    url = lm.group(1)
+                    if url in link_seen:
+                        continue
+                    link_seen.add(url)
+                    label = re.sub(r"<[^>]+>", "", lm.group(2)).strip()
+                    links.append({"url": url, "text": label or url})
+
+        result = (intro_text, images, links)
+        self._book_res[chapter_index] = result
+        return result
+
+    def _html_to_text(self, src):
+        """Convert an HTML fragment to readable plain text with blank-line breaks."""
+        t = re.sub(r"(?i)<(h[1-6])[^>]*>", "\n\n", src)
+        t = re.sub(r"(?i)</(p|div|h[1-6]|li|blockquote|tr)>", "\n\n", t)
+        t = re.sub(r"(?i)<br\s*/?>", "\n", t)
+        t = re.sub(r"<[^>]+>", "", t)
+        t = html.unescape(t)
+        t = re.sub(r"[ \t]+", " ", t)
+        t = re.sub(r"\n{3,}", "\n\n", t)
+        return t.strip()
+
     def _extract_refs(self, body, chapter_dir):
         """Build {verse_number: [{label, text}]} for footnote/commentary links.
 
@@ -3102,7 +3284,16 @@ document.addEventListener('click', function (e) {{
             text = resolve_text(href, title)
             if not text:
                 continue
-            entry = {"label": label, "text": text}
+            # Classify: Crossway puts study notes in *.studynotes.html (ids n…)
+            # and cross references in *.crossrefs.html (ids c…); an inline
+            # title-only marker is treated as a study note.
+            low = (href or "").lower()
+            frag = href.rsplit("#", 1)[-1] if "#" in href else ""
+            if "crossref" in low or frag[:1] == "c":
+                kind = "crossrefs"
+            else:
+                kind = "notes"
+            entry = {"label": label, "text": text, "kind": kind}
             lst = refs.setdefault(current, [])
             if not any(x["label"] == label and x["text"] == text for x in lst):
                 lst.append(entry)
@@ -3425,10 +3616,12 @@ document.addEventListener('click', function (e) {{
             self._update_verse_label()
             self._refresh_refs()
         elif mtype == "ref":
-            self._refs_pinned = {
-                "label": data.get("label", ""),
-                "text": data.get("text", ""),
-            }
+            label = data.get("label", "")
+            text = data.get("text", "")
+            # A single-letter marker is a cross reference; anything else a note.
+            kind = "crossrefs" if len(label) == 1 and label.isalpha() else "notes"
+            self._refs_pinned = {"label": label, "text": text, "kind": kind}
+            self._refs_tab = kind
             self._show_refs()
             self._refresh_refs()
         elif mtype == "edge":
@@ -3578,6 +3771,9 @@ document.addEventListener('click', function (e) {{
             if self._notes_overlay.get_visible():
                 self._hide_notes()
                 return True
+            if self._refs_overlay is not None and self._refs_overlay.get_visible():
+                self._hide_refs()
+                return True
             if self._settings_overlay.get_visible():
                 self._hide_settings()
                 return True
@@ -3719,6 +3915,18 @@ document.addEventListener('click', function (e) {{
         # combos and Escape were already handled above.
         if self._focus_in_text_input():
             return False
+
+        # Number keys 1-5 switch the Resources panel tab when it is visible.
+        if (
+            not ctrl
+            and not shift
+            and self._refs_overlay is not None
+            and self._refs_overlay.get_visible()
+            and kn in ("1", "2", "3", "4", "5")
+        ):
+            key = {"1": "notes", "2": "crossrefs", "3": "intro", "4": "images", "5": "links"}[kn]
+            self._set_ref_tab(key)
+            return True
 
         # If focus is in the reader webview, let the page's JS handle the
         # reader navigation keys (j/k/up/down step verses, h/l/left/right page).

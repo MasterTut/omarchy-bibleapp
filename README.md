@@ -26,6 +26,11 @@ typography and layout while staying true to the Omarchy look.
   cross-reference markers (`[1]`, `<sup>`, `title="…"` links) are extracted per
   verse and shown in a hideable strip above the notes; clicking a marker in the
   text pins its note
+- Tabbed Resources panel (`Ctrl + R`): **Notes · Cross-refs · Introduction ·
+  Images · Links**. Switch tabs with the mouse or the number keys `1`–`5`. For
+  study Bibles (e.g. Crossway ESV) it surfaces the per-book introduction,
+  images/maps/charts (click to open in your viewer), and external web links
+  (click to open in your browser)
 - Paragraphs are automatically split so each verse appears on its own line
   (Crossway-style EPUBs with many verses per paragraph are reformatted on load)
 - Notes record the highlighted verse next to the timestamp (`… · v. 5`);
@@ -44,6 +49,8 @@ typography and layout while staying true to the Omarchy look.
 - `Ctrl + T` — table of contents: books → chapters → verses (arrow keys / `j` /
   `k` to move, `Enter` to open, `h` / `Back` / `Esc` to go back)
 - `Ctrl + N` — notes panel (New button or Ctrl+Enter to add a note; Ctrl+l to edit a highlighted one)
+- `Ctrl + R` — Resources panel above the notes: Notes · Cross-refs · Introduction ·
+  Images · Links; switch tabs with `1`–`5` (or click); `Ctrl + Shift + +/-` resizes it
 - `Ctrl + S` — settings
 - `Ctrl + h` — jump to the notes list (works even while typing a note)
 - `Ctrl + l` — add a note / edit the highlighted note (loads it into the editor)
@@ -53,7 +60,8 @@ typography and layout while staying true to the Omarchy look.
 - `Ctrl + Shift + H` — toggle header
 - `Ctrl + [` / `Ctrl + P` — home / translations browser
 - `Ctrl + B` — toggle reader mode
-- `Ctrl + O` — open a book file
+- `Ctrl + O` — open a book file (disabled on the home screen)
+- `Ctrl + I` — import an EPUB into the library (on Home: `i`)
 - On the home screen: `j` / `k` select Continue where you left off /
   Translations / Import EPUB, Enter opens
 - `H` / `L` / `←` / `→` — previous / next page (always left / right)
