@@ -589,8 +589,8 @@ class OmarchyReader(Gtk.Application):
         self._mode_chips = {}
         for key, label in (
             ("content", " CONTENT "),
-            ("notes", " PERSONAL SPACE "),
             ("refs", " RESOURCES "),
+            ("notes", " PERSONAL SPACE "),
         ):
             lbl = Gtk.Label(label=label)
             lbl.get_style_context().add_class("modeline-chip")
@@ -651,7 +651,10 @@ class OmarchyReader(Gtk.Application):
         # Accent frame on the focused dock panel (none when focus is content).
         self._set_section_frame(self._notes_overlay, self._focus == "notes")
         self._set_section_frame(self._refs_overlay, self._focus == "refs")
-        self._set_section_frame(self._search_overlay, False)
+        self._set_section_frame(
+            self._search_overlay,
+            self._search_overlay is not None and self._search_overlay.get_visible(),
+        )
         if hasattr(self, "_mode_hint"):
             self._mode_hint.set_text(self._context_hint())
         if hasattr(self, "_mode_status"):
@@ -942,14 +945,14 @@ class OmarchyReader(Gtk.Application):
         """Move focus among the content and any *currently open* panels.
 
         Never auto-opens a panel: if only the reading content is present this is
-        a no-op. Ctrl+j / Ctrl+k therefore just walk content -> notes -> resources
-        (skipping whichever are closed) and back.
+        a no-op. Ctrl+j walks content -> resources -> personal space (skipping
+        whichever are closed) and wraps; Ctrl+k reverses.
         """
         order = ["content"]
-        if self._notes_overlay.get_visible():
-            order.append("notes")
         if self._refs_overlay is not None and self._refs_overlay.get_visible():
             order.append("refs")
+        if self._notes_overlay.get_visible():
+            order.append("notes")
         if len(order) <= 1:
             self._update_header_focus()
             return
@@ -1982,8 +1985,9 @@ class OmarchyReader(Gtk.Application):
                 color: {THEME["background"]};
             }}
             .dock {{
-                background-color: alpha({THEME["background"]}, 0.99);
-                border-top: 1px solid rgba(255,255,255,0.15);
+                background-color: {THEME["background"]};
+                border-top: 1px solid rgba(255,255,255,0.12);
+                padding: 3px;
             }}
             .modeline {{
                 background-color: {THEME["background"]};
@@ -2013,15 +2017,20 @@ class OmarchyReader(Gtk.Application):
                 font-weight: bold;
                 padding: 0 12px;
             }}
+            .notes-overlay, .refs-overlay, .search-overlay {{
+                border: 1px solid rgba(255,255,255,0.16);
+                border-radius: 0;
+                margin: 3px;
+                background-color: {THEME["background"]};
+            }}
             .notes-overlay.section-active,
             .refs-overlay.section-active,
             .search-overlay.section-active {{
-                border-left: 3px solid {THEME["accent"]};
-                background-color: alpha({THEME["background"]}, 0.92);
+                border: 1px solid {THEME["accent"]};
+                background-color: alpha({THEME["accent"]}, 0.05);
             }}
             .notes-overlay {{
                 background-color: alpha({THEME["background"]}, 0.97);
-                border-top: 1px solid rgba(255,255,255,0.15);
             }}
             .notes-overlay.panel-focused {{
                 background-color: alpha({THEME["background"]}, 0.88);
@@ -2059,8 +2068,6 @@ class OmarchyReader(Gtk.Application):
             }}
             .refs-overlay {{
                 background-color: alpha({THEME["background"]}, 0.97);
-                border-top: 1px solid rgba(255,255,255,0.15);
-                border-bottom: 1px solid rgba(255,255,255,0.10);
             }}
             .refs-scroller {{
                 background-color: alpha({THEME["background"]}, 0.55);
@@ -2098,7 +2105,6 @@ class OmarchyReader(Gtk.Application):
             }}
             .search-overlay {{
                 background-color: alpha({THEME["background"]}, 0.98);
-                border-top: 1px solid rgba(255,255,255,0.15);
             }}
             .search-overlay entry {{
                 font-size: {self.font_size}px;
