@@ -602,9 +602,6 @@ class OmarchyReader(Gtk.Application):
         side.pack_start(self.notes_textview, True, True, 0)
 
         add_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-        new = Gtk.Button(label="New")
-        new.connect("clicked", self._on_note_new)
-        add_row.pack_start(new, False, False, 0)
         add = Gtk.Button(label="Add")
         add.connect("clicked", self._on_note_add)
         add_row.pack_start(add, False, False, 0)
@@ -741,14 +738,34 @@ class OmarchyReader(Gtk.Application):
         self._set_notes_zone("editor")
         return False
 
+    def _focus_in_notes(self):
+        """True when keyboard focus is inside the Personal Space / notes panel."""
+        if self._notes_overlay is None:
+            return False
+        widget = self.window.get_focus()
+        while widget is not None:
+            if widget is self._notes_overlay:
+                return True
+            widget = widget.get_parent()
+        return False
+
     def _focus_next(self, forward=True):
-        """Move keyboard focus between content, personal notes, and resources."""
-        order = ["content", "notes"]
+        """Move focus among the content and any *currently open* panels.
+
+        Never auto-opens a panel: if only the reading content is present this is
+        a no-op. Ctrl+j / Ctrl+k therefore just walk content -> notes -> resources
+        (skipping whichever are closed) and back.
+        """
+        order = ["content"]
+        if self._notes_overlay.get_visible():
+            order.append("notes")
         if self._refs_overlay is not None and self._refs_overlay.get_visible():
             order.append("refs")
+        if len(order) <= 1:
+            return
         if self._focus_in_refs():
             cur = "refs"
-        elif self._focus_in_text_input() or self._notes_overlay.get_visible():
+        elif self._focus_in_notes():
             cur = "notes"
         else:
             cur = "content"
@@ -759,8 +776,6 @@ class OmarchyReader(Gtk.Application):
         elif nxt == "notes":
             self._focus_notes()
         else:
-            if not self._refs_overlay.get_visible():
-                self._show_refs()
             self._focus_refs()
 
     def _scroll_refs(self, delta, big=False):
@@ -1299,11 +1314,6 @@ class OmarchyReader(Gtk.Application):
 
     def _on_note_add(self, button):
         self._add_note()
-
-    def _on_note_new(self, button):
-        self._editing_note = None
-        self.notes_buffer.set_text("")
-        self.notes_textview.grab_focus()
 
     def _update_verse_label(self):
         if self._current_verse:
