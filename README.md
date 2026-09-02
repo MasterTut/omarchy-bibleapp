@@ -64,6 +64,8 @@ typography and layout while staying true to the Omarchy look.
 - `Ctrl + Shift + K` — keybinding reference
 - `Ctrl + Shift + H` — toggle header
 - `Ctrl + [` — home / translations browser
+- `/` — search a book or passage (e.g. `John 3:16`, `gen 50`, `ps 23`); `↑/↓`
+  select, `Enter` jumps to the chapter (and highlights the verse), `Esc` closes
 - `Ctrl + B` — toggle reader mode
 - `Ctrl + O` — open a book file (disabled on the home screen)
 - `Ctrl + I` — import an EPUB into the library (on Home: `i`)

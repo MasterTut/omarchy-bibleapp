@@ -29,6 +29,7 @@ from reader_config import (
 from reader_assets import FONT_FAMILY, STYLESHEET, PAGE_JS, JS_HANDLER
 from document import Document
 import personalspace
+import verse_ref
 
 
 class OmarchyReader(Gtk.Application):
@@ -38,6 +39,11 @@ class OmarchyReader(Gtk.Application):
         self.doc = None             # Document (EpubSource + reading state)
         self._refs_overlay = None
         self._refs_pinned = None
+        self._search_overlay = None
+        self._search_entry = None
+        self._search_list = None
+        self._search_results = []
+        self._pending_verse = 0
         self._refs_panel_height = 240
         self._refs_tab = "notes"
         self._ref_tab_buttons = {}
@@ -259,6 +265,10 @@ class OmarchyReader(Gtk.Application):
         self._build_help_overlay()
         self.loading_overlay_win.add_overlay(self._help_overlay)
 
+        # Search overlay (opened with "/").
+        self._build_search_overlay()
+        self.loading_overlay_win.add_overlay(self._search_overlay)
+
         self.window = win
         win.add(self.loading_overlay_win)
         win.connect("key-press-event", self.on_key_pressed_raw)
@@ -275,6 +285,7 @@ class OmarchyReader(Gtk.Application):
         self._refs_overlay.set_visible(False)
         self._settings_overlay.set_visible(False)
         self._help_overlay.set_visible(False)
+        self._search_overlay.set_visible(False)
         # Re-apply header visibility (show_all() blindly re-shows everything).
         if SETTINGS.get("auto_hide_header", True):
             self.headerbar.set_visible(False)
@@ -1650,6 +1661,7 @@ class OmarchyReader(Gtk.Application):
         rows = [
             ("Ctrl + T", "Table of contents: books · chapters · verses (j/k, Enter, h/Back)"),
             ("Ctrl + P", "Personal Space: Notes · Prayer · Memory (tabs 1-3)"),
+            ("/", "Search a book or passage (e.g. John 3:16) · Enter jumps there"),
             ("Ctrl + R", "Resources panel: Notes · Cross-refs · Intro · Images · Links"),
             ("1 – 3 / 1 – 5", "Switch tabs in the focused panel (Personal Space / Resources)"),
             ("Ctrl + j / k", "Move focus: content ⇄ personal space ⇄ resources"),
@@ -1700,7 +1712,128 @@ class OmarchyReader(Gtk.Application):
     def _hide_help(self):
         self._help_overlay.set_visible(False)
 
-    def _apply_theme_css(self):
+    # ---------------- Search ("Go to passage") ----------------
+    def _build_search_overlay(self):
+        self._search_overlay = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        self._search_overlay.set_visible(False)
+        self._search_overlay.set_halign(Gtk.Align.CENTER)
+        self._search_overlay.set_valign(Gtk.Align.CENTER)
+        self._search_overlay.set_size_request(460, -1)
+        self._search_overlay.get_style_context().add_class("search-overlay")
+
+        self._search_entry = Gtk.Entry()
+        self._search_entry.set_placeholder_text("Go to…  e.g. John 3:16, ps 23, Genesis")
+        self._search_entry.set_has_frame(True)
+        self._search_entry.connect("changed", self._on_search_changed)
+        self._search_entry.connect("key-press-event", self._on_search_key)
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        box.pack_start(self._search_entry, False, False, 0)
+
+        self._search_list = Gtk.ListBox()
+        self._search_list.set_selection_mode(Gtk.SelectionMode.SINGLE)
+        self._search_list.connect("row-activated", self._on_search_row_activated)
+        self._search_list.set_vexpand(True)
+        scroller = Gtk.ScrolledWindow()
+        scroller.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        scroller.set_size_request(-1, 260)
+        scroller.add(self._search_list)
+        box.pack_start(scroller, True, True, 0)
+
+        hint = Gtk.Label(label="Type a book or reference · ↑/↓ select · Enter go · Esc close")
+        hint.get_style_context().add_class("progress-label")
+        hint.set_margin_top(6)
+        box.pack_start(hint, False, False, 0)
+
+        self._search_overlay.pack_start(box, False, False, 0)
+
+    def _open_search(self):
+        if not self.book_path or not self.chapters:
+            return
+        self._hide_notes()
+        self._hide_refs()
+        self._hide_settings()
+        self._hide_help()
+        self._search_overlay.show_all()
+        self._search_overlay.set_visible(True)
+        self._search_entry.set_text("")
+        self._run_search("")
+        self._search_entry.grab_focus()
+        self._search_entry.select_region(0, 0)
+
+    def _close_search(self):
+        if self._search_overlay is not None:
+            self._search_overlay.set_visible(False)
+
+    def _run_search(self, text):
+        for r in self._search_list.get_children():
+            self._search_list.remove(r)
+        if not self.doc:
+            self._search_results = []
+            return
+        results = verse_ref.search(self.doc.books, text, limit=30)
+        self._search_results = results
+        for res in results:
+            row = Gtk.ListBoxRow()
+            lbl = Gtk.Label(label=res["label"])
+            lbl.set_xalign(0.0)
+            lbl.set_margin_start(10)
+            lbl.set_margin_top(4)
+            lbl.set_margin_bottom(4)
+            row.add(lbl)
+            row._search_data = res
+            self._search_list.add(row)
+        self._search_list.show_all()
+        first = self._search_list.get_row_at_index(0)
+        if first is not None:
+            self._search_list.select_row(first)
+
+    def _on_search_changed(self, entry):
+        self._run_search(entry.get_text())
+
+    def _on_search_key(self, widget, event):
+        kv = event.keyval
+        if kv == Gdk.KEY_Escape:
+            self._close_search()
+            self._focus_content()
+            return True
+        if kv in (Gdk.KEY_Down, Gdk.KEY_Up):
+            self._search_select_offset(1 if kv == Gdk.KEY_Down else -1)
+            return True
+        if kv in (Gdk.KEY_Return, Gdk.KEY_KP_Enter):
+            row = self._search_list.get_selected_row()
+            if row is not None:
+                self._search_goto(getattr(row, "_search_data", None))
+            return True
+        return False
+
+    def _search_select_offset(self, delta):
+        count = len(self._search_results)
+        if count == 0:
+            return
+        cur = self._search_list.get_selected_row()
+        idx = self._search_list.get_row_index(cur) if cur else 0
+        idx = max(0, min(count - 1, idx + delta))
+        row = self._search_list.get_row_at_index(idx)
+        if row is not None:
+            self._search_list.select_row(row)
+            self._search_list.scroll_to(row)
+
+    def _on_search_row_activated(self, listbox, row):
+        self._search_goto(getattr(row, "_search_data", None))
+
+    def _search_goto(self, data):
+        if not data or not self.doc:
+            return
+        idx = data.get("chapter_index")
+        verse = data.get("verse") or 0
+        if idx is None:
+            return
+        self._close_search()
+        self._pending_verse = verse
+        self._focus = "content"
+        self._do_load_chapter(idx)
+        self._focus_content()
+
         css = f"""
             window {{
                 background-color: {THEME["background"]};
@@ -1849,6 +1982,22 @@ class OmarchyReader(Gtk.Application):
                 background-color: alpha({THEME["background"]}, 0.97);
                 border: 1px solid rgba(255,255,255,0.15);
                 border-radius: 12px;
+            }}
+            .search-overlay {{
+                background-color: alpha({THEME["background"]}, 0.98);
+                border: 1px solid rgba(255,255,255,0.15);
+                border-radius: 12px;
+                padding: 8px;
+            }}
+            .search-overlay entry {{
+                font-size: {self.font_size}px;
+                padding: 8px 10px;
+                border-radius: 8px;
+            }}
+            .search-overlay row:selected {{
+                background-color: alpha({THEME["accent"]}, 0.35);
+                color: {THEME["foreground"]};
+                border-radius: 6px;
             }}
             switch {{
                 color: {THEME["foreground"]};
@@ -2437,6 +2586,12 @@ document.addEventListener('click', function (e) {{
                     self._save_state()
 
             self._save_state()
+            # A pending verse (e.g. from search "John 3:16") jumps once the
+            # freshly loaded chapter is paginated.
+            if getattr(self, "_pending_verse", 0):
+                v = self._pending_verse
+                self._pending_verse = 0
+                GLib.idle_add(self._run_js, f"goToVerse({v});")
             if hasattr(self, "_page_pages"):
                 del self._page_pages
             # "Always display" notes: keep the panel open across chapters.
@@ -2602,6 +2757,15 @@ document.addEventListener('click', function (e) {{
         state = event.state
         ctrl = bool(state & Gdk.ModifierType.CONTROL_MASK)
         shift = bool(state & Gdk.ModifierType.SHIFT_MASK)
+
+        # While the search overlay is open, its entry/list own the keyboard.
+        if self._search_overlay is not None and self._search_overlay.get_visible():
+            return False
+
+        # "/" opens the go-to-passage search (not while typing elsewhere).
+        if not ctrl and not shift and kn == "slash" and self.chapters:
+            self._open_search()
+            return True
 
         # All keybinding checks use the lower-cased keyname so Shift/CapsLock
         # do not break hotkeys (e.g. Ctrl+L arriving as keyval "L").
