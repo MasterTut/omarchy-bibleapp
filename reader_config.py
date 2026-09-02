@@ -244,7 +244,6 @@ def save_memory(items):
 
 DEFAULT_SETTINGS = {
     "auto_hide_header": True,
-    "auto_hide_notes": True,
     "note_panel_height": 300,
     "show_personal_space": True,
 }

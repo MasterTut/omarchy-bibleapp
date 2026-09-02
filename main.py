@@ -43,6 +43,7 @@ class OmarchyReader(Gtk.Application):
         self._search_entry = None
         self._search_list = None
         self._search_results = []
+        self._search_alloc_height = 0
         self._pending_verse = 0
         self._refs_panel_height = 240
         self._search_panel_height = 300
@@ -930,7 +931,7 @@ class OmarchyReader(Gtk.Application):
         Resources (top). Each sits just above whichever lower panels are visible,
         so they never overlap and the search bar is always at the very bottom."""
         search_h = (
-            self._search_panel_height
+            getattr(self, "_search_alloc_height", 0)
             if self._search_overlay is not None and self._search_overlay.get_visible()
             else 0
         )
@@ -945,6 +946,14 @@ class OmarchyReader(Gtk.Application):
             self._notes_overlay.set_margin_bottom(search_h)
         if self._refs_overlay is not None:
             self._refs_overlay.set_margin_bottom(search_h + notes_h)
+
+    def _on_search_alloc(self, widget, alloc):
+        # The search bar hugs its content; when its height changes (as results
+        # grow/shrink), lift the panels above it to match.
+        h = alloc.height
+        if getattr(self, "_search_alloc_height", 0) != h:
+            self._search_alloc_height = h
+            self._position_bottom_panels()
 
     def _position_refs_above_notes(self):
         # Back-compatible alias; kept so existing call sites still work.
@@ -1541,40 +1550,6 @@ class OmarchyReader(Gtk.Application):
         self._settings_overlay.pack_start(bar, False, False, 0)
         self._settings_overlay.pack_start(row, False, False, 0)
 
-        # Auto-hide notes.
-        row2 = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
-        row2.set_margin_start(16)
-        row2.set_margin_end(16)
-        row2.set_margin_top(8)
-        row2.set_margin_bottom(8)
-
-        label_box2 = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
-        lbl2 = Gtk.Label(label="Auto-hide notes")
-        lbl2.set_xalign(0.0)
-        lbl2.set_halign(Gtk.Align.START)
-        label_box2.pack_start(lbl2, False, False, 0)
-
-        sub2 = Gtk.Label(
-            label="Hide the Personal Space panel until Ctrl+P, or always keep it open."
-        )
-        sub2.get_style_context().add_class("progress-label")
-        sub2.set_xalign(0.0)
-        sub2.set_halign(Gtk.Align.START)
-        sub2.set_line_wrap(True)
-        label_box2.pack_start(sub2, False, False, 0)
-
-        switch2 = Gtk.Switch()
-        switch2.set_active(SETTINGS.get("auto_hide_notes", True))
-        switch2.set_halign(Gtk.Align.END)
-        switch2.set_valign(Gtk.Align.CENTER)
-        switch2.connect("state-set", self._on_auto_hide_notes_toggled)
-        self._auto_hide_notes_switch = switch2
-
-        row2.pack_start(label_box2, True, True, 0)
-        row2.pack_start(switch2, False, False, 0)
-
-        self._settings_overlay.pack_start(row2, False, False, 0)
-
         row3 = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
         row3.set_margin_start(16)
         row3.set_margin_end(16)
@@ -1615,15 +1590,6 @@ class OmarchyReader(Gtk.Application):
             self._hide_notes()
         return False
 
-    def _on_auto_hide_notes_toggled(self, switch, active):
-        SETTINGS["auto_hide_notes"] = bool(active)
-        save_settings()
-        if not active:
-            self._show_notes()
-        else:
-            self._hide_notes()
-        return False
-
     def _on_auto_hide_toggled(self, switch, active):
         SETTINGS["auto_hide_header"] = bool(active)
         save_settings()
@@ -1645,7 +1611,6 @@ class OmarchyReader(Gtk.Application):
         self._settings_overlay.show_all()
         self._settings_overlay.set_visible(True)
         self._auto_hide_switch.set_active(SETTINGS.get("auto_hide_header", True))
-        self._auto_hide_notes_switch.set_active(SETTINGS.get("auto_hide_notes", True))
 
     def _hide_settings(self):
         self._settings_overlay.set_visible(False)
@@ -1737,17 +1702,20 @@ class OmarchyReader(Gtk.Application):
         self._search_overlay.set_visible(False)
         self._search_overlay.set_halign(Gtk.Align.FILL)
         self._search_overlay.set_valign(Gtk.Align.END)
-        self._search_overlay.set_size_request(-1, self._search_panel_height)
         self._search_overlay.get_style_context().add_class("search-overlay")
+        # Track the bar's real (content-hugging) height so panels above it stack.
+        self._search_overlay.connect("size-allocate", self._on_search_alloc)
 
         self._search_list = Gtk.ListBox()
         self._search_list.set_selection_mode(Gtk.SelectionMode.SINGLE)
         self._search_list.connect("row-activated", self._on_search_row_activated)
         list_scroll = Gtk.ScrolledWindow()
         list_scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
-        list_scroll.set_vexpand(True)
+        # Hug the content: grow with the number of results, up to a cap, then scroll.
+        list_scroll.set_propagate_natural_height(True)
+        list_scroll.set_max_content_height(300)
         list_scroll.add(self._search_list)
-        self._search_overlay.pack_start(list_scroll, True, True, 0)
+        self._search_overlay.pack_start(list_scroll, False, False, 0)
 
         # Input row (bottom of the bar).
         row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
@@ -2619,12 +2587,12 @@ document.addEventListener('click', function (e) {{
                 GLib.idle_add(self._run_js, f"goToVerse({v});")
             if hasattr(self, "_page_pages"):
                 del self._page_pages
-            # "Always display" notes: keep the panel open across chapters.
-            if not SETTINGS.get("auto_hide_notes", True):
-                self._show_notes()
-            else:
-                self._hide_notes()
-                self._refresh_notes()
+            # Personal Space / Resources stay open across chapter loads; only
+            # refresh their content. They are closed via Ctrl+P / Ctrl+R (or the
+            # panel's own close button), never implicitly.
+            self._refresh_notes()
+            if self._refs_overlay is not None and self._refs_overlay.get_visible():
+                self._refresh_refs()
             if pages <= 0:
                 # empty chapter - advance to next non-empty automatically
                 self.next_chapter()
