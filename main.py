@@ -9,10 +9,7 @@ import shlex
 import threading
 import zipfile
 import json
-import tomllib
-import tempfile
 import shutil
-import collections
 
 import gi
 
@@ -21,8 +18,6 @@ gi.require_version("WebKit2", "4.1")
 gi.require_version("GdkPixbuf", "2.0")
 
 from gi.repository import Gtk, Gio, GLib, Gdk, GdkPixbuf, WebKit2
-import ebooklib
-from ebooklib import epub
 
 from reader_config import (
     APP_ID, TRANSLATIONS_DIR, THEME, OMARCHY_STATE, HOTKEYS, SETTINGS,
@@ -31,33 +26,28 @@ from reader_config import (
     list_translations, _display_name,
 )
 from reader_assets import FONT_FAMILY, STYLESHEET, PAGE_JS, JS_HANDLER
-import epubtext
+from epubsource import EpubSource
 
 
 class OmarchyReader(Gtk.Application):
     def __init__(self):
         super().__init__(application_id=APP_ID)
-        self.book = None
-        self.bookdir = None
         self.book_path = None
+        self.source = None          # EpubSource for the currently open book
+        # Mirrors of source state used across the UI.
         self.chapters = []
-        self._chapter_verses = {}
-        self._chapter_refs = {}
-        self._chapter_slice = {}
-        self._item_text_cache = {}
+        self._toc_books = []
         self._refs_overlay = None
         self._refs_pinned = None
         self._refs_panel_height = 240
         self._refs_tab = "notes"
         self._ref_tab_buttons = {}
-        self._book_res = {}
         self.chapter_index = 0
         self.current_page = 0
         self.current_ch = 0
         self.page_count = 0
         self.font_size = 18
         self.reading_mode = "dark"
-        self._toc_books = []
         self._toc_mode = "books"
         self._toc_book_idx = 0
         self._toc_chapter_idx = 0
@@ -96,6 +86,12 @@ class OmarchyReader(Gtk.Application):
         path = getattr(self, "cli_path", None)
         if path:
             self.open_book(path)
+
+    def do_shutdown(self):
+        if self.source is not None:
+            self.source.close()
+            self.source = None
+        Gtk.Application.do_shutdown(self)
 
     def create_window(self):
         win = Gtk.ApplicationWindow(application=self)
@@ -316,7 +312,7 @@ class OmarchyReader(Gtk.Application):
             book = self._toc_books[self._toc_book_idx]
             chapter = book["chapters"][self._toc_chapter_idx]
             title = f"{book['title']} · {chapter['title']}"
-            verse_list = self._chapter_verses.get(chapter["index"], [])
+            verse_list = self.source.verses(chapter["index"]) if self.source else []
             items = [
                 (
                     f"Verse {vn}",
@@ -465,7 +461,6 @@ class OmarchyReader(Gtk.Application):
             chapter_index = data.get("index", 0)
             self._toc_chapter_idx = data.get("chapter_in_book_idx", 0)
             self._do_load_chapter(chapter_index)
-            self._fill_verse_numbers(chapter_index)
             self._toc_mode = "verses"
             self._refresh_toc()
             if self._toc_rows:
@@ -800,8 +795,6 @@ class OmarchyReader(Gtk.Application):
         """Re-render the Resources panel for the current tab + verse."""
         if self._refs_overlay is None or not self._refs_overlay.get_visible():
             return
-        if self.chapter_index not in self._chapter_refs:
-            self._ensure_chapter_refs(self.chapter_index)
         for child in self._refs_body.get_children():
             self._refs_body.remove(child)
 
@@ -813,9 +806,9 @@ class OmarchyReader(Gtk.Application):
             self.refs_loc.set_text(f"{book_name} · v. {verse}" if verse else book_name)
             if self._refs_pinned is not None and tab == "notes":
                 entries = [self._refs_pinned]
-            elif verse:
+            elif verse and self.source:
                 want = "crossrefs" if tab == "crossrefs" else "notes"
-                allrefs = self._chapter_refs.get(self.chapter_index, {})
+                allrefs = self.source.refs(self.chapter_index)
                 entries = [e for e in allrefs.get(verse, []) if e.get("kind", "notes") == want]
             else:
                 entries = []
@@ -827,7 +820,7 @@ class OmarchyReader(Gtk.Application):
                 for e in entries:
                     self._ref_card(e.get("label", ""), e.get("text", ""))
         else:
-            intro, images, links = self._get_book_resources(self.chapter_index)
+            intro, images, links = self.source.resources(self.chapter_index) if self.source else ("", [], [])
             self.refs_loc.set_text(book_name)
             if tab == "intro":
                 if intro.strip():
@@ -2100,9 +2093,18 @@ document.addEventListener('click', function (e) {{
     def _open_book_real(self, path):
         try:
             self._on_home = False
+            if self.source is not None:
+                self.source.close()
+            source = EpubSource(path)
+            if not source.load():
+                source.close()
+                self.show_welcome()
+                return False
+            self.source = source
             self.book_path = path
-            self.book = epub.read_epub(path)
-            self._prepare_chapters()
+            # Refresh UI mirrors of the parsed model.
+            self.chapters = source.chapters
+            self._toc_books = source.books
             if not self.chapters:
                 self.show_welcome()
                 return False
@@ -2116,546 +2118,6 @@ document.addEventListener('click', function (e) {{
             self.progress_label.set_text(f"Error: {e}")
         return False
 
-    def _prepare_chapters(self):
-        self._chapter_verses = {}
-        self._chapter_refs = {}
-        self._chapter_slice = {}
-        self._item_text_cache = {}
-        self._book_res = {}
-        if self.bookdir:
-            shutil.rmtree(self.bookdir, ignore_errors=True)
-        self.bookdir = tempfile.mkdtemp(prefix="omarchy-bible-")
-
-        self._item_paths = {}
-        for item in self.book.get_items():
-            name = item.get_name()
-            if not name:
-                continue
-            safe = os.path.join(self.bookdir, name)
-            os.makedirs(os.path.dirname(safe) or self.bookdir, exist_ok=True)
-            try:
-                with open(safe, "wb") as f:
-                    f.write(item.get_content())
-                self._item_paths[name] = safe
-            except Exception:
-                pass
-
-        # Dedicated handling for Crossway "ESV Study Bible" style EPUBs: scripture
-        # lives in bNN.MM.Book.text.html files with anchor-based chapters
-        # (<span class="chapter-num">), per-verse <span class="verse-num">, and
-        # separate .studynotes.html / .crossrefs.html companions.
-        if self._looks_like_study_bible() and self._prepare_study_bible():
-            return
-
-        # Build chapters from the book's own table of contents (ebooklib exposes
-        # it as a flat list of epub.Link objects). This gives the structural
-        # chapter list (e.g. "Genesis", "Exodus", ...) rather than every spine
-        # item, which for many books is hundreds of raw fragments.
-        entries = self._flatten_toc()
-
-        # Many free Bibles (e.g. these eReaderBibles EPUBs) expose their TOC
-        # only through the NCX, which ebooklib does not populate into .toc.
-        # Parse the NCX directly in that case.
-        if not entries:
-            entries = self._parse_ncx()
-
-        # Some publishers (e.g. Crossway ESV) list only book-level entries in
-        # the TOC; the book file itself contains links to the chapter files.
-        # Expand those entries so each chapter becomes its own item.
-        expanded = []
-        for title, href in entries:
-            intro_name = self._resolve_href(href)
-            intro_path = self._item_paths.get(intro_name)
-            if intro_path:
-                links = self._extract_chapter_links(intro_path)
-                if links:
-                    for link_text, ch_href in links:
-                        ch_name = self._resolve_href(ch_href)
-                        ch_path = self._item_paths.get(ch_name)
-                        if ch_path:
-                            expanded.append((title, f"{title} {link_text}", ch_path, ch_name))
-                    continue
-            # No chapter links: treat this entry as a chapter itself.
-            if intro_path:
-                expanded.append((title, title or "Chapter", intro_path, intro_name))
-
-        # Fallback: no usable TOC, use document spine items.
-        if not expanded:
-            for item in self.book.get_items_of_type(ebooklib.ITEM_DOCUMENT):
-                name = item.get_name()
-                path = self._item_paths.get(name)
-                if not path:
-                    continue
-                title = getattr(item, "title", None) or os.path.basename(name)
-                expanded.append((title, title, path, name))
-
-        # Group chapters into books. For Crossway, book_title is already the
-        # book name. For flat chapter lists like KJV/ASV, book_title is the
-        # same as chapter_title; re-group by removing the trailing chapter
-        # number from the title.
-        books_map = {}
-        for book_title, ch_title, path, name in expanded:
-            if book_title not in books_map:
-                books_map[book_title] = []
-            books_map[book_title].append((ch_title, path, name))
-
-        if all(len(chs) == 1 for chs in books_map.values()):
-            books_map = {}
-            for book_title, ch_title, path, name in expanded:
-                m = re.match(r"^(.*?)\s+(\d+)$", (ch_title or "").strip())
-                bt = m.group(1).strip() if m else book_title
-                books_map.setdefault(bt, []).append((ch_title, path, name))
-
-        self.chapters = []
-        self._toc_books = []
-        for book_title, chs in books_map.items():
-            book_chapters = []
-            for ch_title, path, name in chs:
-                idx = len(self.chapters)
-                self.chapters.append(("", ch_title, path, name))
-                book_chapters.append({"title": ch_title, "index": idx, "verses": []})
-            self._toc_books.append({"title": book_title, "chapters": book_chapters})
-
-    def _looks_like_study_bible(self):
-        """True if the book has Crossway Study-Bible style bNN.MM.*.text.html."""
-        for name in self._item_paths:
-            if re.search(r'(?:^|/)b\d{2}\.\d{2}\..+\.text\.html$', name):
-                return True
-        return False
-
-    def _prepare_study_bible(self):
-        """Build chapters for a Crossway ESV Study Bible by slicing text files.
-
-        Chapters are anchor-based: each book's scripture lives in one or more
-        bNN.MM.Book.text.html files, and each chapter begins at a
-        '<span class="chapter-num">N</span>' preceded by the section heading
-        '<p id="vNN NNN 001">'. We record per-chapter (start, end) offsets into
-        the file so a chapter can be rendered on its own.
-        """
-        by_book = collections.OrderedDict()
-        for name, path in self._item_paths.items():
-            m = re.search(r'(?:^|/)b(\d{2})\.(\d{2})\.(.+?)\.text\.html$', name)
-            if m:
-                by_book.setdefault(m.group(1), []).append(
-                    (int(m.group(2)), name, path, m.group(3))
-                )
-        if not by_book:
-            return False
-
-        self.chapters = []
-        self._toc_books = []
-        self._chapter_slice = {}
-        for bid in sorted(by_book):
-            book_name = None
-            book_chapters = []
-            for _part, name, path, raw_name in sorted(by_book[bid]):
-                try:
-                    with open(path, "rb") as f:
-                        content = f.read().decode("utf-8", "replace")
-                except Exception:
-                    continue
-                if not book_name:
-                    h = re.search(r"<h2>(.*?)</h2>", content, flags=re.S)
-                    book_name = re.sub(r"<[^>]+>", "", h.group(1)).strip() if h else raw_name
-                marks = list(
-                    re.finditer(r'<span class="chapter-num">\s*(\d+)\s*</span>', content)
-                )
-                bounds = []
-                for mk in marks:
-                    cnum = int(mk.group(1))
-                    heading_id = f"v{bid}{cnum:03d}001"
-                    hp = content.find(f'id="{heading_id}"')
-                    start = mk.start()
-                    if hp != -1 and hp < mk.start():
-                        pstart = content.rfind("<p", 0, hp)
-                        if pstart != -1:
-                            start = pstart
-                    bounds.append((cnum, start))
-                for k, (cnum, start) in enumerate(bounds):
-                    if k + 1 < len(bounds):
-                        end = bounds[k + 1][1]
-                    else:
-                        be = content.find("</body>", start)
-                        end = be if be != -1 else len(content)
-                    idx = len(self.chapters)
-                    title = f"{book_name} {cnum}"
-                    self.chapters.append((book_name, title, path, name))
-                    self._chapter_slice[idx] = (start, end)
-                    book_chapters.append({"title": title, "index": idx, "verses": []})
-            if book_chapters:
-                self._toc_books.append(
-                    {"title": book_name or f"Book {int(bid)}", "chapters": book_chapters}
-                )
-        return bool(self.chapters)
-
-    def _extract_chapter_links(self, intro_path):
-        """Extract chapter file links from a book introduction page.
-
-        Used by Crossway-style EPUBs where the TOC lists only book-level files,
-        and the book file contains links like 'Chapter 1', 'Chapter 2', ...
-        """
-        try:
-            with open(intro_path, "rb") as f:
-                content = f.read().decode("utf-8", "replace")
-        except Exception:
-            return []
-        body = self._extract_body(content)
-        links = re.findall(
-            r'<a\s+[^>]*href="([^"]*)"[^>]*>(.*?)</a>',
-            body,
-            flags=re.I | re.S,
-        )
-        result = []
-        for href, text in links:
-            text = re.sub(r"<[^>]+>", "", text)
-            text = text.replace("&nbsp;", " ").replace("\xa0", " ").strip()
-            if not text:
-                continue
-            if not re.search(r"\bchapter\b|\bch\b", text, flags=re.I):
-                continue
-            ch_name = self._resolve_href(href)
-            if not ch_name or ch_name not in self._item_paths:
-                continue
-            result.append((text, href))
-        return result
-
-    def _chapter_body(self, chapter_index):
-        """Return the annotated (data-vn tagged) body HTML for one chapter.
-
-        For anchor-sliced study Bibles this returns just that chapter's slice;
-        for normal EPUBs it returns the whole chapter file's body.
-        """
-        if not 0 <= chapter_index < len(self.chapters):
-            return ""
-        _, _, path, _ = self.chapters[chapter_index]
-        try:
-            with open(path, "rb") as f:
-                content = f.read().decode("utf-8", "replace")
-        except Exception:
-            return ""
-        sl = self._chapter_slice.get(chapter_index)
-        if sl:
-            content = content[sl[0]:sl[1]]
-        body = self._annotate_verses(self._extract_body(content))
-        return self._inject_first_verse(body)
-
-    def _inject_first_verse(self, body):
-        return epubtext.inject_first_verse(body)
-
-    def _fill_verse_numbers(self, chapter_index):
-        """Populate the verse list for a chapter (fast; refs are lazy)."""
-        if chapter_index in self._chapter_verses:
-            return
-        if not 0 <= chapter_index < len(self.chapters):
-            return
-        body = self._chapter_body(chapter_index)
-        numbers = sorted({int(n) for n in re.findall(r'data-vn="(\d+)"', body)})
-        self._chapter_verses[chapter_index] = numbers
-
-    def _ensure_chapter_refs(self, chapter_index):
-        """Lazily compute the per-verse reference/commentary map for a chapter."""
-        if chapter_index in self._chapter_refs:
-            return
-        if not 0 <= chapter_index < len(self.chapters):
-            self._chapter_refs[chapter_index] = {}
-            return
-        _, _, path, _ = self.chapters[chapter_index]
-        body = self._chapter_body(chapter_index)
-        self._chapter_refs[chapter_index] = self._extract_refs(body, os.path.dirname(path))
-
-    def _get_book_resources(self, chapter_index):
-        """Return (intro_text, images, links) for the book a chapter belongs to.
-
-        Reads the book's .intros.html companion (present in Crossway study
-        Bibles) and the chapter's own slice to collect the introduction text,
-        embedded images/maps/charts, and external web links. Cached per chapter.
-        """
-        if chapter_index in self._book_res:
-            return self._book_res[chapter_index]
-        empty = ("", [], [])
-        if not 0 <= chapter_index < len(self.chapters):
-            return empty
-        book_name, _, path, name = self.chapters[chapter_index]
-        intro_text, images, links = "", [], []
-
-        # Locate the book's intros file: same bNN. prefix, .intros.html suffix.
-        m = re.search(r'(b\d{2})\.(\d{2})\.', name)
-        intro_body = ""
-        intro_dir = ""
-        if m:
-            bid = m.group(1)
-            intro_name = None
-            for candidate in self._item_paths:
-                if re.search(rf'(?:^|/){bid}\.\d{{2}}\..+\.intros\.html$', candidate):
-                    intro_name = candidate
-                    break
-            if intro_name:
-                try:
-                    with open(self._item_paths[intro_name], "rb") as f:
-                        raw = f.read().decode("utf-8", "replace")
-                    intro_body = self._extract_body(raw)
-                    intro_text = self._html_to_text(intro_body)
-                    intro_dir = os.path.dirname(self._item_paths[intro_name])
-                except Exception:
-                    intro_body = ""
-
-            # Images from the intros page.
-            seen = set()
-            for im in re.finditer(r'<img[^>]*\bsrc="([^"]+)"', intro_body, flags=re.I):
-                src = im.group(1)
-                base = os.path.basename(src)
-                cand = os.path.normpath(os.path.join(intro_dir, src)) if intro_dir else ""
-                if not (cand and os.path.isfile(cand)):
-                    cand = next(
-                        (p for n, p in self._item_paths.items()
-                         if os.path.basename(n) == base),
-                        "",
-                    )
-                if cand and cand not in seen:
-                    seen.add(cand)
-                    images.append({"path": cand, "caption": base})
-
-            # External links across the whole book (intros + notes + refs).
-            link_seen = set()
-            scan_names = [
-                n for n in self._item_paths
-                if re.search(rf'(?:^|/){bid}\.\d{{2}}\..+\.(?:intros|studynotes|crossrefs)\.html$', n)
-            ]
-            for n in scan_names:
-                try:
-                    with open(self._item_paths[n], "rb") as f:
-                        txt = f.read().decode("utf-8", "replace")
-                except Exception:
-                    continue
-                for lm in re.finditer(
-                    r'<a[^>]*\bhref="(https?://[^"]+)"[^>]*>(.*?)</a>', txt, flags=re.I | re.S
-                ):
-                    url = lm.group(1)
-                    if url in link_seen:
-                        continue
-                    link_seen.add(url)
-                    label = re.sub(r"<[^>]+>", "", lm.group(2)).strip()
-                    links.append({"url": url, "text": label or url})
-
-        result = (intro_text, images, links)
-        self._book_res[chapter_index] = result
-        return result
-
-    def _html_to_text(self, src):
-        return epubtext.html_to_text(src)
-
-    def _extract_refs(self, body, chapter_dir):
-        """Build {verse_number: [{label, text}]} for footnote/commentary links.
-
-        Handles the common study-Bible marker styles: an <a> carrying an inline
-        title="..." note, an <a> linking to an id in the same chapter file, and
-        an <a> linking to an id in another extracted file (footnote appendix).
-        """
-        anchor_re = re.compile(
-            r'data-vn="(\d+)"|<a\b([^>]*?)>(.*?)</a>', re.I | re.S
-        )
-        refs = {}
-        current = None
-
-        def attr(attrs, name):
-            m = re.search(name + r'="([^"]*)"', attrs or "", re.I)
-            return m.group(1) if m else ""
-
-        def clean(seg):
-            seg = re.sub(r"<[^>]+>", " ", seg)
-            seg = html.unescape(seg)
-            return re.sub(r"\s+", " ", seg).strip()
-
-        def text_from(src, want_id):
-            m = re.search(r'id="' + re.escape(want_id) + r'"', src)
-            if not m:
-                return ""
-            pos = m.end()
-            gt = src.find(">", pos)
-            body_from = (gt + 1) if gt != -1 and gt < pos + 400 else pos
-            # Crossref entry: just this letter's refs until the next letter/verse.
-            if re.match(r"c\d+\.\w", want_id):
-                seg = src[body_from:body_from + 1200]
-                stop = re.search(r'<span class="crossref-|</p>|<h\d', seg)
-                if stop:
-                    seg = seg[:stop.start()]
-                return clean(seg)
-            # Study note / generic: capture the enclosing block element.
-            block_start = max(
-                src.rfind("<p", 0, m.start()),
-                src.rfind("<div", 0, m.start()),
-                src.rfind("<li", 0, m.start()),
-                src.rfind("<blockquote", 0, m.start()),
-            )
-            if block_start == -1:
-                block_start = m.start()
-            tagm = re.match(r"<(\w+)", src[block_start:])
-            tag = tagm.group(1) if tagm else "p"
-            close = src.find("</" + tag + ">", body_from)
-            if close == -1:
-                block_end = body_from + 2500
-            else:
-                block_end = close
-            seg = src[block_start:block_end]
-            return clean(seg)[:2500]
-
-        def resolve_text(href, title):
-            if title:
-                return html.unescape(title).strip()
-            if not href or href.startswith("http") or href.startswith("mailto"):
-                return ""
-            file_part, _, frag = href.partition("#")
-            if not frag:
-                return ""
-            if not file_part:
-                return text_from(body, frag)
-            fname = os.path.normpath(os.path.join(chapter_dir, file_part))
-            src = self._item_text_cache.get(fname)
-            if src is None:
-                try:
-                    with open(fname, "rb") as f:
-                        src = f.read().decode("utf-8", "replace")
-                except Exception:
-                    src = ""
-                self._item_text_cache[fname] = src
-            return text_from(src, frag)
-
-        for m in anchor_re.finditer(body):
-            if m.group(1) is not None:
-                current = int(m.group(1))
-                continue
-            attrs, inner = m.group(2), m.group(3)
-            label = html.unescape(re.sub(r"<[^>]+>", "", inner)).strip()
-            title = attr(attrs, "title")
-            href = attr(attrs, "href")
-            if current is None:
-                continue
-            if not title and not (href and "#" in href):
-                continue
-            text = resolve_text(href, title)
-            if not text:
-                continue
-            # Classify: Crossway puts study notes in *.studynotes.html (ids n…)
-            # and cross references in *.crossrefs.html (ids c…); an inline
-            # title-only marker is treated as a study note.
-            low = (href or "").lower()
-            frag = href.rsplit("#", 1)[-1] if "#" in href else ""
-            if "crossref" in low or frag[:1] == "c":
-                kind = "crossrefs"
-            else:
-                kind = "notes"
-            entry = {"label": label, "text": text, "kind": kind}
-            lst = refs.setdefault(current, [])
-            if not any(x["label"] == label and x["text"] == text for x in lst):
-                lst.append(entry)
-        return refs
-
-
-    def _flatten_toc(self):
-        """Return a flat list of (title, href) from the book's TOC.
-
-        ebooklib's `book.toc` is normally a flat list of epub.Link, but some
-        books nest sections as (Link, [children]) tuples. This flattens both.
-        """
-        result = []
-        raw = getattr(self.book, "toc", None) or []
-        if isinstance(raw, str):
-            return result
-        stack = list(raw)
-        while stack:
-            node = stack.pop(0)
-            if isinstance(node, tuple):
-                link, children = node[0], node[1]
-                if isinstance(link, str) or link is None:
-                    continue
-                try:
-                    if link.title:
-                        result.append((link.title, link.href))
-                except Exception:
-                    pass
-                if children:
-                    stack = list(children) + stack
-            else:
-                try:
-                    if getattr(node, "title", None):
-                        result.append((node.title, node.href))
-                except Exception:
-                    pass
-        return result
-
-    def _resolve_href(self, href):
-        """Resolve a TOC href to a document item name, or '' if not found."""
-        if not href:
-            return ""
-        target = href.split("#")[0].replace("\\", "/")
-        while target.startswith("./"):
-            target = target[2:]
-        # ebooklib item names may also carry a leading './'
-        if target in self._item_paths:
-            return target
-        stripped = target.lstrip("./")
-        for name in self._item_paths:
-            if name.lstrip("./") == stripped:
-                return name
-        return ""
-
-    def _parse_ncx(self):
-        """Parse the book's NCX to extract (title, href) chapter entries.
-
-        Many free Bibles (including the eReaderBibles EPUBs) keep their full
-        table of contents in the NCX file, which ebooklib does not translate
-        into `book.toc`. Here we walk the navMap and return the leaf navPoints
-        (those without nested children), skipping the parent book-name
-        containers so we end up with entries like "Genesis 1", "Genesis 2", ...
-        """
-        import xml.etree.ElementTree as ET
-
-        entries = []
-        ncx = None
-        for item in self.book.get_items():
-            if item.get_name().lower().endswith(("toc.ncx", ".ncx")):
-                ncx = item
-                break
-        if ncx is None:
-            return entries
-
-        try:
-            raw = (ncx.get_content() or b"").decode("utf-8", "replace")
-            root = ET.fromstring(raw)
-        except Exception:
-            return entries
-
-        ns = ""
-        if root.tag.startswith("{"):
-            ns = root.tag.split("}")[0] + "}"
-
-        def walk(navpoint):
-            label = navpoint.find(f"{ns}navLabel/{ns}text")
-            content = navpoint.find(f"{ns}content")
-            children = navpoint.findall(f"{ns}navPoint")
-            title = (label.text or "").strip() if label is not None else ""
-            src = content.get("src", "") if content is not None else ""
-            if not children and title and src:
-                entries.append((title, src))
-            for child in children:
-                walk(child)
-
-        navmap = root.find(f"{ns}navMap")
-        if navmap is not None:
-            for navpoint in navmap.findall(f"{ns}navPoint"):
-                walk(navpoint)
-
-        return entries
-
-    def _extract_body(self, content):
-        return epubtext.extract_body(content)
-
-    def _annotate_verses(self, body):
-        return epubtext.annotate_verses(body)
-
-    def _split_verses_into_lines(self, body):
-        return epubtext.split_verses_into_lines(body)
-
     # ---------------- Chapter loading ----------------
     def _do_load_chapter(self, index):
         if index < 0 or index >= len(self.chapters):
@@ -2665,7 +2127,7 @@ document.addEventListener('click', function (e) {{
         self.title_label.set_text(title)
         self.progress_label.set_text(f"{index + 1}/{len(self.chapters)}")
 
-        body_content = self._split_verses_into_lines(self._chapter_body(index))
+        body_content = self.source.chapter_html(index)
         base_url = "file://" + os.path.dirname(path) + "/"
 
         page_html = f"""<!doctype html><html><head><meta charset="utf-8">
@@ -2678,7 +2140,6 @@ document.addEventListener('click', function (e) {{
 
         self._is_loading = True
         self._page_pages = 0
-        self._fill_verse_numbers(index)
         self._refs_pinned = None
         self._show_spinner(True)
         self.webview.load_html(page_html, base_url)
