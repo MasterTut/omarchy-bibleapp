@@ -371,6 +371,19 @@ function currentVerseEl() {
   return p.querySelector('.v-highlight');
 }
 
+function currentVerseNum() {
+  var el = document.querySelector('.v-highlight');
+  return el ? (parseInt(el.getAttribute('data-vn'), 10) || 0) : 0;
+}
+
+function currentVerseText() {
+  var el = document.querySelector('.v-highlight');
+  if (!el) return '';
+  var par = el.closest('p') || el.parentNode;
+  var t = (par ? (par.innerText || par.textContent) : (el.innerText || el.textContent)) || '';
+  return t.replace(/\s+/g, ' ').trim();
+}
+
 function applyVerseHighlight(el, vn) {
   clearVerseHighlight();
   if (!el) return;

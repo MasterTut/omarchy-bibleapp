@@ -23,10 +23,12 @@ from reader_config import (
     APP_ID, TRANSLATIONS_DIR, THEME, OMARCHY_STATE, HOTKEYS, SETTINGS,
     load_theme, load_config, log_import, load_state, save_state,
     load_notes, save_notes, load_settings, save_settings,
+    load_prayers, save_prayers, load_memory, save_memory,
     list_translations, _display_name,
 )
 from reader_assets import FONT_FAMILY, STYLESHEET, PAGE_JS, JS_HANDLER
 from document import Document
+import personalspace
 
 
 class OmarchyReader(Gtk.Application):
@@ -52,11 +54,13 @@ class OmarchyReader(Gtk.Application):
         self._parent_monitor = None
         self._monitor_parent_path = None
         self.notes = {}
+        self.prayers = []
+        self.memory = []
         self._notes_overlay = None
         self._note_panel_height = 300
-        self._notes_zone = "editor"
-        self._note_card_rows = []
-        self._highlight_index = -1
+        self._ps_tab = "notes"
+        self._ps_tabs = {}
+        self._ps_stack = None
         self._active_section = "content"
         self._on_home = False
         self._home_options = []
@@ -553,10 +557,10 @@ class OmarchyReader(Gtk.Application):
         bar.set_margin_top(10)
         bar.set_margin_bottom(6)
 
-        self.notes_title = Gtk.Label(label="Personal Notes")
+        self.notes_title = Gtk.Label(label="Personal Space")
         self.notes_title.get_style_context().add_class("title-label")
         self.notes_title.set_halign(Gtk.Align.START)
-        bar.pack_start(self.notes_title, True, True, 0)
+        bar.pack_start(self.notes_title, False, False, 0)
 
         self.notes_loc = Gtk.Label(label="")
         self.notes_loc.get_style_context().add_class("progress-label")
@@ -566,55 +570,108 @@ class OmarchyReader(Gtk.Application):
         close.connect("clicked", lambda *_: self._hide_notes())
         bar.pack_end(close, False, False, 0)
 
-        # Body: left = notes list, right = entry + add.
-        body = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
-        body.set_margin_start(16)
-        body.set_margin_end(16)
-        body.set_margin_bottom(12)
+        self._notes_overlay.pack_start(bar, False, False, 0)
 
-        self.notes_list = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
-        self.notes_scroller = scroller = Gtk.ScrolledWindow()
-        scroller.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
-        scroller.set_vexpand(True)
-        scroller.set_hexpand(True)
-        scroller.add(self.notes_list)
-        scroller.get_style_context().add_class("notes-scroller")
-        body.pack_start(scroller, True, True, 0)
+        # Tab bar: 1 Notes · 2 Prayer · 3 Memory.
+        tabbar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        tabbar.set_margin_start(16)
+        tabbar.set_margin_end(16)
+        tabbar.set_margin_bottom(8)
+        self._ps_tabs = {}
+        for key, label in (("notes", "1 Notes"), ("prayer", "2 Prayer"), ("memory", "3 Memory")):
+            b = Gtk.Button(label=label)
+            b.set_relief(Gtk.ReliefStyle.NONE)
+            b.connect("clicked", lambda _w, k=key: self._set_ps_tab(k))
+            tabbar.pack_start(b, False, False, 0)
+            self._ps_tabs[key] = b
+        self._notes_overlay.pack_start(tabbar, False, False, 0)
 
-        side = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
-        side.set_valign(Gtk.Align.FILL)
-        side.set_size_request(340, -1)
+        self._ps_stack = stack = Gtk.Stack()
+        stack.set_transition_type(Gtk.StackTransitionType.NONE)
+        stack.set_vexpand(True)
+        stack.set_hexpand(True)
 
-        self.notes_editor_box = side
-
-        # Verse reference label (shows the verse that will be saved with the
-        # note, or "General notes" when no verse is highlighted).
-        self.notes_verse_label = Gtk.Label(label="General notes")
+        # ---- Notes page (editor only, per verse) ----
+        note_page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        note_page.set_margin_start(16)
+        note_page.set_margin_end(16)
+        note_page.set_margin_bottom(12)
+        self.notes_verse_label = Gtk.Label(label="General note")
         self.notes_verse_label.get_style_context().add_class("progress-label")
         self.notes_verse_label.set_xalign(0.0)
-        side.pack_start(self.notes_verse_label, False, False, 0)
-
+        note_page.pack_start(self.notes_verse_label, False, False, 0)
         self.notes_textview = Gtk.TextView()
         self.notes_textview.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
         self.notes_textview.set_vexpand(True)
         self.notes_textview.connect("key-press-event", self._on_note_textview_key)
         self.notes_buffer = self.notes_textview.get_buffer()
-        side.pack_start(self.notes_textview, True, True, 0)
-
-        add_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        note_page.pack_start(self.notes_textview, True, True, 0)
+        nrow = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
         add = Gtk.Button(label="Add")
         add.connect("clicked", self._on_note_add)
-        add_row.pack_start(add, False, False, 0)
+        nrow.pack_start(add, False, False, 0)
+        ndel = Gtk.Button(label="Delete")
+        ndel.connect("clicked", lambda *_: self._delete_current_note())
+        nrow.pack_start(ndel, False, False, 0)
+        nhint = Gtk.Label(label="Ctrl+Enter add \u00b7 Ctrl+J to content \u00b7 1-3 tabs")
+        nhint.get_style_context().add_class("progress-label")
+        nrow.pack_start(nhint, True, True, 0)
+        note_page.pack_start(nrow, False, False, 0)
+        stack.add_named(note_page, "notes")
 
-        hint = Gtk.Label(label="Ctrl+Enter save \u00b7 Ctrl+J to content \u00b7 Ctrl+N close")
-        hint.get_style_context().add_class("progress-label")
-        add_row.pack_start(hint, True, True, 0)
-        side.pack_start(add_row, False, False, 0)
+        # ---- Prayer page ----
+        prayer_page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        prayer_page.set_margin_start(16)
+        prayer_page.set_margin_end(16)
+        prayer_page.set_margin_bottom(12)
+        self.prayer_list = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        pscroller = Gtk.ScrolledWindow()
+        pscroller.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
+        pscroller.set_vexpand(True)
+        pscroller.add(self.prayer_list)
+        prayer_page.pack_start(pscroller, True, True, 0)
+        prow = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        self.prayer_entry = Gtk.Entry()
+        self.prayer_entry.set_placeholder_text("New prayer request\u2026")
+        self.prayer_entry.connect("activate", lambda *_: self._prayer_add())
+        prow.pack_start(self.prayer_entry, True, True, 0)
+        self.prayer_freq = Gtk.ComboBoxText()
+        for f in ("daily", "weekly", "monthly"):
+            self.prayer_freq.append_text(f.capitalize())
+        self.prayer_freq.set_active(0)
+        prow.pack_start(self.prayer_freq, False, False, 0)
+        padd = Gtk.Button(label="Add")
+        padd.connect("clicked", lambda *_: self._prayer_add())
+        prow.pack_start(padd, False, False, 0)
+        prayer_page.pack_start(prow, False, False, 0)
+        stack.add_named(prayer_page, "prayer")
 
-        body.pack_start(side, False, False, 0)
+        # ---- Memory page ----
+        memory_page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        memory_page.set_margin_start(16)
+        memory_page.set_margin_end(16)
+        memory_page.set_margin_bottom(12)
+        self.memory_list = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        mscroller = Gtk.ScrolledWindow()
+        mscroller.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
+        mscroller.set_vexpand(True)
+        mscroller.add(self.memory_list)
+        memory_page.pack_start(mscroller, True, True, 0)
+        mrow = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        madd = Gtk.Button(label="Add current verse")
+        madd.connect("clicked", lambda *_: self._memory_add_current())
+        mrow.pack_start(madd, False, False, 0)
+        self.memory_hide_btn = Gtk.ToggleButton(label="Hide text")
+        self.memory_hide_btn.connect("toggled", lambda *_: self._refresh_memory())
+        mrow.pack_start(self.memory_hide_btn, False, False, 0)
+        mhint = Gtk.Label(label="Follows you across books \u00b7 Space toggles")
+        mhint.get_style_context().add_class("progress-label")
+        mrow.pack_start(mhint, True, True, 0)
+        memory_page.pack_start(mrow, False, False, 0)
+        stack.add_named(memory_page, "memory")
 
-        self._notes_overlay.pack_start(bar, False, False, 0)
-        self._notes_overlay.pack_start(body, True, True, 0)
+        self._notes_overlay.pack_start(stack, True, True, 0)
+        self._ps_tab = "notes"
         self._apply_note_height(SETTINGS.get("note_panel_height", 300))
 
     def _build_refs_overlay(self):
@@ -734,8 +791,9 @@ class OmarchyReader(Gtk.Application):
     def _focus_notes(self):
         if not self._notes_overlay.get_visible():
             self._show_notes()
+        else:
+            self._set_ps_tab(getattr(self, "_ps_tab", "notes"))
         self._active_section = "notes"
-        self._set_notes_zone("editor")
         return False
 
     def _focus_in_notes(self):
@@ -950,39 +1008,25 @@ class OmarchyReader(Gtk.Application):
         self._apply_refs_height(max(140, self._refs_panel_height - amount))
 
     def _notes_lose_focus_appearance(self):
-        """Make the notes panel look unfocused without hiding it."""
-        self._notes_zone = "editor"
-        overlay = self._notes_overlay.get_style_context()
-        overlay.remove_class("panel-focused")
-        overlay.remove_class("editor-active")
-        overlay.remove_class("list-active")
-        scroller = self.notes_scroller.get_style_context()
-        scroller.remove_class("zone-active")
-        editor = self.notes_editor_box.get_style_context()
-        editor.remove_class("zone-active")
+        """Make the Personal Space panel look unfocused without hiding it."""
+        self._notes_overlay.get_style_context().remove_class("panel-focused")
+
+    def _edit_from_list(self):
+        """Ctrl+l: open Personal Space on the Notes tab for the current verse."""
+        if not SETTINGS.get("show_personal_space", True):
+            return
+        self._active_section = "notes"
+        self._show_notes()
+        self._set_ps_tab("notes")
 
     def _set_section(self, section):
-        """Set the active section: \"list\", \"editor\", or \"content\".
-
-        This controls both focus and which keys navigate. Section changes in
-        the order list -> editor -> content (cycling).
-        """
+        """Set the active focus section: \"notes\" (Personal Space) or \"content\"."""
         if not self.book_path or not self.chapters:
             return
-        if section == "list":
-            self._editing_note = None
+        if section == "notes":
             self._active_section = "notes"
             self._show_notes()
-            if self._note_card_rows:
-                self._set_notes_zone("list")
-            else:
-                self._set_notes_zone("editor")
-        elif section == "editor":
-            self._active_section = "notes"
-            self._show_notes()
-            self._set_notes_zone("editor")
         elif section == "content":
-            self._editing_note = None
             self._active_section = "content"
             self._notes_lose_focus_appearance()
             if self.webview:
@@ -990,15 +1034,6 @@ class OmarchyReader(Gtk.Application):
             else:
                 self.window.grab_focus()
             self._panel_focus_state()
-
-    def _cycle_section(self):
-        """Cycle to the next section: notes list -> add a note -> content."""
-        if self._active_section == "content":
-            self._set_section("list")
-        elif self._notes_zone == "list":
-            self._set_section("editor")
-        else:
-            self._set_section("content")
 
     def _home_apply_highlight(self):
         """Visual feedback for the home-screen j/k selection."""
@@ -1057,7 +1092,7 @@ class OmarchyReader(Gtk.Application):
         self._run_js(f"moveVerse({delta});")
 
     def _panel_focus_state(self):
-        focused = self._notes_zone == "list" or self._focus_in_text_input()
+        focused = self._focus_in_text_input()
         ov = self._notes_overlay.get_style_context()
         if focused:
             ov.add_class("panel-focused")
@@ -1067,238 +1102,116 @@ class OmarchyReader(Gtk.Application):
 
     def _load_notes_from_disk(self):
         self.notes = load_notes()
+        self.prayers = load_prayers()
+        self.memory = load_memory()
 
     def _write_notes(self):
         save_notes(self.notes)
 
     def _note_key(self):
-        """Stable location key for the current book/chapter/page."""
         return self.doc.note_key() if self.doc else None
 
-    def _legacy_note_keys(self):
-        """Older notes.json entries anchored by page number instead of char."""
-        return self.doc.legacy_note_keys() if self.doc else []
+    def _verse_note_key(self):
+        """Per-verse note key for the currently highlighted verse."""
+        if not self.doc:
+            return None
+        return personalspace.note_key(
+            self.doc.book_name, self.doc.chapter_index, self._current_verse
+        )
 
     def _note_location_label(self):
         if not self.doc:
             return ""
-        book = os.path.basename(self.book_path) if self.book_path else ""
-        return self.doc.location_label(_display_name(book) if book else "")
+        book = _display_name(self.doc.book_name) if self.doc.book_name else ""
+        base = f"{book} · ch {self.chapter_index + 1}"
+        if self._current_verse:
+            base += f" · v. {self._current_verse}"
+        return base
 
     def _toggle_notes(self):
+        if not SETTINGS.get("show_personal_space", True):
+            return
         if self._notes_overlay.get_visible():
             self._hide_notes()
         else:
             self._show_notes()
 
     def _show_notes(self):
+        if not SETTINGS.get("show_personal_space", True):
+            return
         if not self.book_path or not self.chapters:
             return
         self._hide_toc()
         self._hide_settings()
         self._hide_help()
         self._notes_overlay.set_visible(True)
-        self._refresh_notes()
         self._notes_overlay.show_all()
-        self._update_verse_label()
-        # Focus the editor so typing a note works immediately and plain keys
-        # (space, letters, ...) are not stolen by the reader's page navigator.
-        self._set_notes_zone("editor")
+        self._set_ps_tab(getattr(self, "_ps_tab", "notes"))
         self._panel_focus_state()
         self._position_refs_above_notes()
 
     def _hide_notes(self):
         self._notes_overlay.set_visible(False)
         self._notes_overlay.get_style_context().remove_class("panel-focused")
-        self._notes_overlay.get_style_context().remove_class("editor-active")
-        self._notes_overlay.get_style_context().remove_class("list-active")
         self._position_refs_above_notes()
         if self.webview and not self._on_home:
             self.webview.grab_focus()
         else:
             self.window.grab_focus()
 
-    def _refresh_notes(self):
-        """Rebuild the notes list for the current page."""
-        if not hasattr(self, "notes_list") or self._notes_overlay is None:
+    # ---------------- Personal Space tabs ----------------
+    def _set_ps_tab(self, key):
+        if key not in self._ps_tabs:
             return
-        if not self._notes_overlay.get_visible():
-            return
-        key = self._note_key()
-        self.notes_loc.set_text(self._note_location_label())
-        for child in self.notes_list.get_children():
-            self.notes_list.remove(child)
-        self._note_card_rows = []
-        self._highlight_index = -1
-
-        if key is None:
-            empty = Gtk.Label(label="No page selected.")
-            empty.get_style_context().add_class("progress-label")
-            self.notes_list.pack_start(empty, False, False, 0)
-            return
-
-        # Merge the char-anchored key with any legacy page-anchored keys, but
-        # dedupe: on page 1 the char offset is 0 so _note_key() already equals
-        # the legacy page key — adding both would show every note twice.
-        keys = []
-        for k in [key] + self._legacy_note_keys():
-            if k and k not in keys:
-                keys.append(k)
-        notes = []
-        for k in keys:
-            notes.extend(self.notes.get(k, []))
-        if not notes:
-            empty = Gtk.Label(label="No notes for this page.")
-            empty.get_style_context().add_class("progress-label")
-            self.notes_list.pack_start(empty, False, False, 0)
-            return
-
-        for idx, note in enumerate(notes):
-            row = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
-            row.get_style_context().add_class("note-card")
-            self._note_card_rows.append(row)
-            row.connect("button-press-event", lambda *_, i=idx: self._on_card_clicked(i))
-
-            ntext = note.get("text", note) if isinstance(note, dict) else note
-            nts = note.get("ts") if isinstance(note, dict) else ""
-            nverse = note.get("verse", 0) if isinstance(note, dict) else 0
-
-            text = Gtk.Label(label=str(ntext))
-            text.set_xalign(0.0)
-            text.set_line_wrap(True)
-            text.set_halign(Gtk.Align.START)
-            row.pack_start(text, False, False, 0)
-
-            meta = nts
-            if nverse:
-                meta = f"{meta} \u00b7 v. {nverse}" if meta else f"v. {nverse}"
+        self._ps_tab = key
+        self._ps_stack.set_visible_child_name(key)
+        for k, b in self._ps_tabs.items():
+            ctx = b.get_style_context()
+            if k == key:
+                ctx.add_class("tab-active")
             else:
-                meta = f"{meta} \u00b7 General notes" if meta else "General notes"
-            if meta:
-                ts = Gtk.Label(label=meta)
-                ts.get_style_context().add_class("progress-label")
-                ts.set_xalign(0.0)
-                ts.set_halign(Gtk.Align.START)
-                row.pack_start(ts, False, False, 0)
-
-            del_btn = Gtk.Button(label="Delete")
-            del_btn.set_halign(Gtk.Align.END)
-            del_btn.connect("clicked", lambda *_, k=key, i=idx: self._delete_note(k, i))
-            row.pack_end(del_btn, False, False, 0)
-
-            self.notes_list.pack_start(row, False, False, 0)
-
-        self.notes_list.show_all()
-
-    def _on_card_clicked(self, index):
-        if 0 <= index < len(self._note_card_rows):
-            self._highlight_index = index
-            self._apply_highlight()
-            if self._notes_zone != "list":
-                self._set_notes_zone("list")
-        return True
-
-    def _set_notes_zone(self, zone):
-        """Switch keyboard focus between the notes editor and the notes list."""
-        self._notes_zone = zone
-        overlay = self._notes_overlay.get_style_context()
-        overlay.remove_class("editor-active")
-        overlay.remove_class("list-active")
-        ov = self._notes_overlay.get_style_context()
-        scroller = self.notes_scroller.get_style_context()
-        editor = self.notes_editor_box.get_style_context()
-        if zone == "editor":
-            ov.add_class("editor-active")
-            editor.add_class("zone-active")
-            scroller.remove_class("zone-active")
+                ctx.remove_class("tab-active")
+        if key == "notes":
+            self._load_verse_note()
             self.notes_textview.grab_focus()
+        elif key == "prayer":
+            self._refresh_prayer()
+            self.prayer_entry.grab_focus()
+        elif key == "memory":
+            self._refresh_memory()
+
+    def _refresh_notes(self):
+        """Refresh whichever Personal Space tab is currently active."""
+        if self._notes_overlay is None or not self._notes_overlay.get_visible():
+            return
+        self.notes_loc.set_text(self._note_location_label())
+        tab = getattr(self, "_ps_tab", "notes")
+        if tab == "notes":
+            self._load_verse_note()
+        elif tab == "prayer":
+            self._refresh_prayer()
         else:
-            ov.add_class("list-active")
-            scroller.add_class("zone-active")
-            editor.remove_class("zone-active")
-            if self._note_card_rows:
-                if self._highlight_index < 0:
-                    self._highlight_index = 0
-                self._apply_highlight()
-                self.notes_scroller.grab_focus()
-            else:
-                self.notes_textview.grab_focus()
-                self._notes_zone = "editor"
-                self._set_notes_zone("editor")
-                return
-        self._panel_focus_state()
+            self._refresh_memory()
 
-    def _apply_highlight(self):
-        """Visually highlight the currently selected note card."""
-        for i, row in enumerate(self._note_card_rows):
-            if i == self._highlight_index:
-                row.get_style_context().add_class("selected")
-            else:
-                row.get_style_context().remove_class("selected")
-
-    def _move_highlight(self, delta):
-        if not self._note_card_rows:
+    def _load_verse_note(self):
+        key = self._verse_note_key()
+        self._update_verse_label()
+        if key is None:
             return
-        n = len(self._note_card_rows)
-        self._highlight_index = (self._highlight_index + delta) % n
-        self._apply_highlight()
-        row = self._note_card_rows[self._highlight_index]
-        if hasattr(self, "notes_scroller") and self.notes_scroller.get_vadjustment() is not None:
-            adj = self.notes_scroller.get_vadjustment()
-            lo, hi = row.get_allocation().y, row.get_allocation().y + row.get_allocation().height
-            if adj:
-                adj.set_value(min(max(lo, adj.get_value()), max(0, hi - adj.get_page_size())))
-            self.notes_scroller.queue_draw()
+        lst = self.notes.get(key) or []
+        text = ""
+        if lst:
+            first = lst[0]
+            text = first.get("text", "") if isinstance(first, dict) else str(first)
+        s, e = self.notes_buffer.get_bounds()
+        if self.notes_buffer.get_text(s, e, False) != text:
+            self.notes_buffer.set_text(text)
 
-    def _highlight_note_key_index(self):
-        """Map the highlighted row to (key, index) in self.notes, or (None, None).
-
-        The on-screen list merges the char-anchored key with any legacy page
-        keys, so walk those lists in the same order to find the real location.
-        """
-        if self._highlight_index < 0 or not self._note_card_rows:
-            return None, None
-        key = self._note_key()
-        if not key:
-            return None, None
-        keys = []
-        for k in [key] + self._legacy_note_keys():
-            if k and k not in keys:
-                keys.append(k)
-        idx = self._highlight_index
-        for k in keys:
-            lst = self.notes.get(k)
-            if lst is None:
-                continue
-            if idx < len(lst):
-                return k, idx
-            idx -= len(lst)
-        return None, None
-
-    def _edit_from_list(self):
-        """Ctrl+l: load the highlighted note into the add-note editor for
-        editing, or open a fresh editor when nothing is highlighted."""
-        self._editing_note = None
-        key, idx = self._highlight_note_key_index()
-        if key is not None and idx is not None:
-            lst = self.notes.get(key)
-            if lst and 0 <= idx < len(lst):
-                self._editing_note = {"key": key, "idx": idx}
-                entry = lst[idx]
-                text = str(entry.get("text", "")) if isinstance(entry, dict) else str(entry)
-                self.notes_buffer.set_text(text)
-                end = self.notes_buffer.get_end_iter()
-                self.notes_buffer.place_cursor(end)
-        self._set_section("editor")
-
-    def _delete_highlighted(self):
-        key, idx = self._highlight_note_key_index()
-        if key is None or idx is None:
-            return
-        lst = self.notes.get(key)
-        if lst and 0 <= idx < len(lst):
-            self._delete_note(key, idx)
-            self._move_highlight(0)
+    def _update_verse_label(self):
+        if self._current_verse:
+            self.notes_verse_label.set_text(f"Verse {self._current_verse}")
+        else:
+            self.notes_verse_label.set_text("Chapter note (no verse selected)")
 
     def _on_note_textview_key(self, widget, event):
         ctrl = bool(event.state & Gdk.ModifierType.CONTROL_MASK)
@@ -1306,7 +1219,7 @@ class OmarchyReader(Gtk.Application):
             self._add_note()
             return True
         # The text view would otherwise eat Ctrl+J / Ctrl+K (line feed), so
-        # route those to section focus-cycling here.
+        # route those to panel focus-cycling here.
         if ctrl and event.keyval in (Gdk.KEY_j, Gdk.KEY_k):
             self._focus_next(forward=(event.keyval == Gdk.KEY_j))
             return True
@@ -1315,57 +1228,142 @@ class OmarchyReader(Gtk.Application):
     def _on_note_add(self, button):
         self._add_note()
 
-    def _update_verse_label(self):
-        if self._current_verse:
-            self.notes_verse_label.set_text(f"Verse {self._current_verse}")
-        else:
-            self.notes_verse_label.set_text("General notes")
-
     def _add_note(self):
-        start, end = self.notes_buffer.get_bounds()
-        text = self.notes_buffer.get_text(start, end, False).strip()
-        self.notes_buffer.set_text("")
-        if not text:
-            return
-        key = self._note_key()
+        key = self._verse_note_key()
         if key is None:
             return
+        s, e = self.notes_buffer.get_bounds()
+        text = self.notes_buffer.get_text(s, e, False).strip()
         from datetime import datetime
-
-        # Editing an existing note loaded via Ctrl+l: update it in place.
-        edit = self._editing_note
-        self._editing_note = None
-        if edit:
-            lst = self.notes.get(edit.get("key"))
-            idx = edit.get("idx")
-            if lst and 0 <= idx < len(lst):
-                lst[idx]["text"] = text
-                lst[idx]["verse"] = self._current_verse or 0
-                self._write_notes()
-                self._refresh_notes()
-                return
-            # The original note is gone (deleted/navigated away): fall
-            # through and save a fresh note rather than dropping the text.
-
-        entry = {
-            "text": text,
-            "ts": datetime.now().strftime("%Y-%m-%d %H:%M"),
-            "verse": self._current_verse or 0,
-        }
-        self.notes.setdefault(key, []).append(entry)
-        self._write_notes()
-        self._refresh_notes()
-
-    def _delete_note(self, key, index):
-        notes = self.notes.get(key)
-        if not notes or index >= len(notes):
-            return
-        del notes[index]
-        if not notes:
+        if not text:
             self.notes.pop(key, None)
+        else:
+            self.notes[key] = [{
+                "text": text,
+                "ts": datetime.now().strftime("%Y-%m-%d %H:%M"),
+                "verse": self._current_verse or 0,
+            }]
         self._write_notes()
-        self._refresh_notes()
+        self._update_verse_label()
 
+    def _delete_current_note(self):
+        key = self._verse_note_key()
+        if key is not None:
+            self.notes.pop(key, None)
+            self._write_notes()
+        self.notes_buffer.set_text("")
+
+    # ---------------- Prayer requests ----------------
+    def _prayer_add(self):
+        text = self.prayer_entry.get_text().strip()
+        if not text:
+            return
+        freq = (self.prayer_freq.get_active_text() or "Daily").lower()
+        self.prayers = personalspace.add_prayer(self.prayers, text, freq)
+        save_prayers(self.prayers)
+        self.prayer_entry.set_text("")
+        self._refresh_prayer()
+
+    def _prayer_toggle(self, pid):
+        self.prayers = personalspace.toggle_prayer(self.prayers, pid)
+        save_prayers(self.prayers)
+        self._refresh_prayer()
+
+    def _prayer_remove(self, pid):
+        self.prayers = personalspace.remove_prayer(self.prayers, pid)
+        save_prayers(self.prayers)
+        self._refresh_prayer()
+
+    def _refresh_prayer(self):
+        if not hasattr(self, "prayer_list"):
+            return
+        for c in self.prayer_list.get_children():
+            self.prayer_list.remove(c)
+        if not self.prayers:
+            lbl = Gtk.Label(label="No prayer requests yet. Add one below.")
+            lbl.get_style_context().add_class("progress-label")
+            lbl.set_halign(Gtk.Align.START)
+            self.prayer_list.pack_start(lbl, False, False, 0)
+        for p in self.prayers:
+            pending = personalspace.is_pending(p)
+            row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+            chk = Gtk.CheckButton()
+            chk.set_active(not pending)
+            chk.connect("toggled", lambda _w, pid=p["id"]: self._prayer_toggle(pid))
+            row.pack_start(chk, False, False, 0)
+            label = Gtk.Label(label=f"{p['text']}  [{p.get('freq', 'daily')}]")
+            label.set_xalign(0.0)
+            label.set_line_wrap(True)
+            label.set_hexpand(True)
+            if not pending:
+                label.get_style_context().add_class("progress-label")
+            row.pack_start(label, True, True, 0)
+            rm = Gtk.Button(label="Delete")
+            rm.set_relief(Gtk.ReliefStyle.NONE)
+            rm.connect("clicked", lambda _w, pid=p["id"]: self._prayer_remove(pid))
+            row.pack_start(rm, False, False, 0)
+            self.prayer_list.pack_start(row, False, False, 0)
+        self.prayer_list.show_all()
+
+    # ---------------- Memorization ----------------
+    def _memory_add_current(self):
+        if not self.doc:
+            return
+        self._run_js(
+            "post({type:'memory_capture', verse: currentVerseNum(),"
+            " text: currentVerseText()});"
+        )
+
+    def _memory_add(self, verse, text):
+        if not self.doc:
+            return
+        book = _display_name(self.doc.book_name) if self.doc.book_name else self.doc.book_name
+        self.memory, _ = personalspace.add_memory(
+            self.memory, book, self.chapter_index + 1, verse or 1, text or ""
+        )
+        save_memory(self.memory)
+        self._refresh_memory()
+
+    def _memory_toggle(self, key):
+        self.memory = personalspace.toggle_memory(self.memory, key)
+        save_memory(self.memory)
+        self._refresh_memory()
+
+    def _memory_remove(self, key):
+        self.memory = personalspace.remove_memory(self.memory, key)
+        save_memory(self.memory)
+        self._refresh_memory()
+
+    def _refresh_memory(self):
+        if not hasattr(self, "memory_list"):
+            return
+        for c in self.memory_list.get_children():
+            self.memory_list.remove(c)
+        hide = self.memory_hide_btn.get_active() if hasattr(self, "memory_hide_btn") else False
+        if not self.memory:
+            lbl = Gtk.Label(label="No verses yet. Highlight one and 'Add current verse'.")
+            lbl.get_style_context().add_class("progress-label")
+            lbl.set_halign(Gtk.Align.START)
+            self.memory_list.pack_start(lbl, False, False, 0)
+        for m in self.memory:
+            box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+            hrow = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+            chk = Gtk.CheckButton(label=f"{m.get('book', '')} {m.get('chapter', 0)}:{m.get('verse', 0)}")
+            chk.set_active(m.get("done", False))
+            chk.connect("toggled", lambda _w, k=m["key"]: self._memory_toggle(k))
+            hrow.pack_start(chk, True, True, 0)
+            rm = Gtk.Button(label="Delete")
+            rm.set_relief(Gtk.ReliefStyle.NONE)
+            rm.connect("clicked", lambda _w, k=m["key"]: self._memory_remove(k))
+            hrow.pack_start(rm, False, False, 0)
+            box.pack_start(hrow, False, False, 0)
+            txt = Gtk.Label(label="(hidden)" if hide else m.get("text", ""))
+            txt.set_xalign(0.0)
+            txt.set_line_wrap(True)
+            txt.get_style_context().add_class("progress-label")
+            box.pack_start(txt, False, False, 0)
+            self.memory_list.pack_start(box, False, False, 0)
+        self.memory_list.show_all()
     # ---------------- Settings ----------------
     def _build_settings_overlay(self):
         """Build the settings panel (opened with Ctrl+S)."""
@@ -1456,6 +1454,46 @@ class OmarchyReader(Gtk.Application):
 
         self._settings_overlay.pack_start(row2, False, False, 0)
 
+        row3 = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        row3.set_margin_start(16)
+        row3.set_margin_end(16)
+        row3.set_margin_top(8)
+        row3.set_margin_bottom(8)
+
+        label_box3 = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        lbl3 = Gtk.Label(label="Show Personal Space")
+        lbl3.set_xalign(0.0)
+        lbl3.set_halign(Gtk.Align.START)
+        label_box3.pack_start(lbl3, False, False, 0)
+        sub3 = Gtk.Label(
+            label="Notes, Prayer Requests and Memorization (Ctrl+N). "
+            "Turn off to hide the feature entirely."
+        )
+        sub3.get_style_context().add_class("progress-label")
+        sub3.set_xalign(0.0)
+        sub3.set_halign(Gtk.Align.START)
+        sub3.set_line_wrap(True)
+        label_box3.pack_start(sub3, False, False, 0)
+
+        switch3 = Gtk.Switch()
+        switch3.set_active(SETTINGS.get("show_personal_space", True))
+        switch3.set_halign(Gtk.Align.END)
+        switch3.set_valign(Gtk.Align.CENTER)
+        switch3.connect("state-set", self._on_show_personal_space_toggled)
+        self._show_ps_switch = switch3
+
+        row3.pack_start(label_box3, True, True, 0)
+        row3.pack_start(switch3, False, False, 0)
+
+        self._settings_overlay.pack_start(row3, False, False, 0)
+
+    def _on_show_personal_space_toggled(self, switch, active):
+        SETTINGS["show_personal_space"] = bool(active)
+        save_settings()
+        if not active and self._notes_overlay is not None:
+            self._hide_notes()
+        return False
+
     def _on_auto_hide_notes_toggled(self, switch, active):
         SETTINGS["auto_hide_notes"] = bool(active)
         save_settings()
@@ -1518,13 +1556,12 @@ class OmarchyReader(Gtk.Application):
 
         rows = [
             ("Ctrl + T", "Table of contents: books · chapters · verses (j/k, Enter, h/Back)"),
-            ("Ctrl + N", "Personal Notes panel (New button / Ctrl+Enter to add)"),
+            ("Ctrl + N", "Personal Space: Notes · Prayer · Memory (tabs 1-3)"),
             ("Ctrl + R", "Resources panel: Notes · Cross-refs · Intro · Images · Links"),
-            ("1 – 5", "Switch the Resources panel tab (when open)"),
-            ("Ctrl + j / k", "Move focus: content ⇄ personal notes ⇄ resources"),
+            ("1 – 3 / 1 – 5", "Switch tabs in the focused panel (Personal Space / Resources)"),
+            ("Ctrl + j / k", "Move focus: content ⇄ personal space ⇄ resources"),
             ("j / k (resources)", "Scroll the Resources panel · h / l switch tabs"),
-            ("Ctrl + h", "Jump to notes list (works while typing)"),
-            ("Ctrl + l", "Add a note / edit the highlighted note"),
+            ("Ctrl + h / l", "Focus the Personal Space notes editor"),
             ("Ctrl + Shift + H", "Toggle header bar"),
             ("Ctrl + S", "Settings"),
             ("Ctrl + Shift + K", "Keybindings reference"),
@@ -1535,8 +1572,8 @@ class OmarchyReader(Gtk.Application):
             ("H / L / ← / →", "Previous / next page (left / right)"),
             ("J / K / ↑ / ↓", "Notes highlighted: move up / down · content: step verses (j/↓ down, k/↑ up)"),
             ("Home: j/k, i, x", "Move selection · i imports · x removes a translation"),
-            ("x", "Delete the highlighted note (or, on Home, the translation)"),
-            ("Ctrl + Shift + +/-", "Grow / shrink the notes or references panel"),
+            ("x (Home)", "Delete the highlighted translation"),
+            ("Ctrl + Shift + +/-", "Grow / shrink the focused panel (Personal Space / Resources)"),
             ("Ctrl + Right / Ctrl + Left", "Traverse chapters"),
         ]
         lines = "\n".join(
@@ -1691,7 +1728,7 @@ class OmarchyReader(Gtk.Application):
             .ref-card label {{
                 color: {THEME["foreground"]};
             }}
-            .refs-overlay button.tab-active {{
+            .refs-overlay button.tab-active, .notes-overlay button.tab-active {{
                 background-color: alpha({THEME["accent"]}, 0.28);
                 border-radius: 6px;
                 font-weight: bold;
@@ -2257,6 +2294,7 @@ document.addEventListener('click', function (e) {{
             self._refs_pinned = None
             self._update_verse_label()
             self._refresh_refs()
+            self._refresh_notes()
         elif mtype == "ref":
             label = data.get("label", "")
             text = data.get("text", "")
@@ -2266,6 +2304,8 @@ document.addEventListener('click', function (e) {{
             self._refs_tab = kind
             self._show_refs()
             self._refresh_refs()
+        elif mtype == "memory_capture":
+            self._memory_add(int(data.get("verse") or 0), data.get("text", ""))
         elif mtype == "edge":
             if data.get("dir") == "next":
                 self.next_chapter()
@@ -2446,25 +2486,24 @@ document.addEventListener('click', function (e) {{
                 self._toggle_header()
                 return True
             if shift and keyname in ("plus", "equal"):
-                if self._refs_overlay is not None and self._refs_overlay.get_visible():
+                if self._focus_in_refs():
                     self._grow_refs_height()
                 else:
                     self._grow_note_height()
                 return True
             if shift and keyname in ("minus", "underscore"):
-                if self._refs_overlay is not None and self._refs_overlay.get_visible():
+                if self._focus_in_refs():
                     self._shrink_refs_height()
                 else:
                     self._shrink_note_height()
                 return True
             if not shift and kn == "h":
-                # Ctrl+h always jumps to the highlight-able notes list
-                # (works even while typing a note).
-                self._set_section("list")
+                # Ctrl+h focuses the Personal Space notes editor (works while typing).
+                self._edit_from_list()
                 return True
             if not shift and kn == "l":
-                # Ctrl+l: from a highlighted note, load it for editing in the
-                # add-note editor; otherwise open a fresh editor.
+                # Ctrl+l also focuses the Personal Space notes editor for the
+                # current verse.
                 self._edit_from_list()
                 return True
             if not shift and kn in ("j", "k"):
@@ -2552,17 +2591,22 @@ document.addEventListener('click', function (e) {{
         if self._focus_in_text_input():
             return False
 
-        # Number keys 1-5 switch the Resources panel tab when it is visible.
-        if (
-            not ctrl
-            and not shift
-            and self._refs_overlay is not None
-            and self._refs_overlay.get_visible()
-            and kn in ("1", "2", "3", "4", "5")
-        ):
-            key = {"1": "notes", "2": "crossrefs", "3": "intro", "4": "images", "5": "links"}[kn]
-            self._set_ref_tab(key)
-            return True
+        # Number keys switch tabs: 1-5 for the Resources panel, 1-3 for the
+        # Personal Space panel (Notes / Prayer / Memory), whichever is focused.
+        if not ctrl and not shift and kn in ("1", "2", "3", "4", "5"):
+            if self._focus_in_refs():
+                key = {
+                    "1": "notes", "2": "crossrefs", "3": "intro",
+                    "4": "images", "5": "links",
+                }.get(kn)
+                if key:
+                    self._set_ref_tab(key)
+                    return True
+            elif self._focus_in_notes():
+                key = {"1": "notes", "2": "prayer", "3": "memory"}.get(kn)
+                if key:
+                    self._set_ps_tab(key)
+                    return True
 
         # When the Resources panel is focused, j/k (and arrows) scroll it and
         # h/l switch tabs — without touching where you are in the content.
@@ -2598,21 +2642,7 @@ document.addEventListener('click', function (e) {{
             elif kn in ("j", "k", "up", "down", "h", "l", "left", "right"):
                 return False
 
-        # Notes list navigation: j/k and up/down move the highlight, x deletes.
-        # h/l/left/right are consumed so they don't page the reader behind the
-        # notes overlay.
-        if self._notes_zone == "list" and self._note_card_rows:
-            if kn in ("j", "down"):
-                self._move_highlight(1)
-                return True
-            if kn in ("k", "up"):
-                self._move_highlight(-1)
-                return True
-            if kn == "x":
-                self._delete_highlighted()
-                return True
-            if kn in ("h", "l", "left", "right"):
-                return True
+        # Notes list navigation removed: Personal Space is now editor/tabs based.
 
         # Paging: h/l and arrow/page keys always work.
         if kn in ("h", "left"):
