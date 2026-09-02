@@ -688,12 +688,20 @@ class OmarchyReader(Gtk.Application):
 
     def _build_refs_overlay(self):
         """Build the tabbed Resources panel (a strip above the notes)."""
-        self._refs_overlay = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        # EventBox gives the panel a real GdkWindow so a click anywhere in it
+        # focuses it (its label children are windowless and would not).
+        self._refs_overlay = Gtk.EventBox()
         self._refs_overlay.set_visible(False)
         self._refs_overlay.set_halign(Gtk.Align.FILL)
         self._refs_overlay.set_valign(Gtk.Align.END)
         self._refs_overlay.set_size_request(-1, self._refs_panel_height)
         self._refs_overlay.get_style_context().add_class("refs-overlay")
+        self._refs_overlay.connect(
+            "button-press-event", lambda *_: self._focus_refs()
+        )
+        self._refs_inner = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        self._refs_overlay.add(self._refs_inner)
+        outer = self._refs_inner
 
         bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
         bar.set_margin_start(16)
@@ -714,7 +722,7 @@ class OmarchyReader(Gtk.Application):
         close.connect("clicked", lambda *_: self._hide_refs())
         bar.pack_end(close, False, False, 0)
 
-        self._refs_overlay.pack_start(bar, False, False, 0)
+        outer.pack_start(bar, False, False, 0)
 
         # Tab bar: Notes · Cross-refs · Introduction · Images · Links.
         tabs = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
@@ -734,7 +742,7 @@ class OmarchyReader(Gtk.Application):
             btn.connect("clicked", lambda _b, k=key: self._set_ref_tab(k))
             tabs.pack_start(btn, False, False, 0)
             self._ref_tab_buttons[key] = btn
-        self._refs_overlay.pack_start(tabs, False, False, 0)
+        outer.pack_start(tabs, False, False, 0)
 
         self._refs_body = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
         self._refs_body.set_margin_start(16)
@@ -748,7 +756,7 @@ class OmarchyReader(Gtk.Application):
         scroller.add(self._refs_body)
         scroller.get_style_context().add_class("refs-scroller")
 
-        self._refs_overlay.pack_start(scroller, True, True, 0)
+        outer.pack_start(scroller, True, True, 0)
 
     def _set_ref_tab(self, key):
         if key not in self._ref_tab_buttons:
@@ -1519,7 +1527,7 @@ class OmarchyReader(Gtk.Application):
         label_box2.pack_start(lbl2, False, False, 0)
 
         sub2 = Gtk.Label(
-            label="Hide the notes panel until Ctrl+N, or always keep it open."
+            label="Hide the Personal Space panel until Ctrl+P, or always keep it open."
         )
         sub2.get_style_context().add_class("progress-label")
         sub2.set_xalign(0.0)
@@ -1551,7 +1559,7 @@ class OmarchyReader(Gtk.Application):
         lbl3.set_halign(Gtk.Align.START)
         label_box3.pack_start(lbl3, False, False, 0)
         sub3 = Gtk.Label(
-            label="Notes, Prayer Requests and Memorization (Ctrl+N). "
+            label="Notes, Prayer Requests and Memorization (Ctrl+P). "
             "Turn off to hide the feature entirely."
         )
         sub3.get_style_context().add_class("progress-label")
@@ -1641,7 +1649,7 @@ class OmarchyReader(Gtk.Application):
 
         rows = [
             ("Ctrl + T", "Table of contents: books · chapters · verses (j/k, Enter, h/Back)"),
-            ("Ctrl + N", "Personal Space: Notes · Prayer · Memory (tabs 1-3)"),
+            ("Ctrl + P", "Personal Space: Notes · Prayer · Memory (tabs 1-3)"),
             ("Ctrl + R", "Resources panel: Notes · Cross-refs · Intro · Images · Links"),
             ("1 – 3 / 1 – 5", "Switch tabs in the focused panel (Personal Space / Resources)"),
             ("Ctrl + j / k", "Move focus: content ⇄ personal space ⇄ resources"),
@@ -1650,7 +1658,7 @@ class OmarchyReader(Gtk.Application):
             ("Ctrl + Shift + H", "Toggle header bar"),
             ("Ctrl + S", "Settings"),
             ("Ctrl + Shift + K", "Keybindings reference"),
-            ("Ctrl + [ / Ctrl + P", "Home / choose a translation"),
+            ("Ctrl + [", "Home / choose a translation"),
             ("Ctrl + B", "Toggle reader mode"),
             ("Ctrl + I", "Import an EPUB into the library"),
             ("Ctrl + O", "Open a book file (in the reader)"),
@@ -2015,10 +2023,10 @@ class OmarchyReader(Gtk.Application):
         elif self._refs_overlay is not None and self._refs_overlay.get_visible():
             tips.append("Ctrl+J ⇄ Resources")
         if not self._notes_overlay.get_visible():
-            tips.append("Ctrl+N notes")
+            tips.append("Ctrl+P notes")
         if self._refs_overlay is not None and not self._refs_overlay.get_visible():
             tips.append("Ctrl+R refs")
-        return " · ".join(tips) or "Ctrl+N notes · Ctrl+R refs · Ctrl+T contents"
+        return " · ".join(tips) or "Ctrl+P notes · Ctrl+R refs · Ctrl+T contents"
 
     def _update_header_focus(self):
         if not hasattr(self, "_focus_label") or self._focus_label is None:
@@ -2683,9 +2691,6 @@ document.addEventListener('click', function (e) {{
                 return True
             if self._hotkey_matches(HOTKEYS.get("settings"), keyname, state):
                 self._toggle_settings()
-                return True
-            if self._hotkey_matches(HOTKEYS.get("home"), keyname, state):
-                self.show_welcome()
                 return True
             if self._hotkey_matches(HOTKEYS.get("home_bracket"), keyname, state):
                 self.show_welcome()
