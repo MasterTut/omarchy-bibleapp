@@ -26,26 +26,19 @@ from reader_config import (
     list_translations, _display_name,
 )
 from reader_assets import FONT_FAMILY, STYLESHEET, PAGE_JS, JS_HANDLER
-from epubsource import EpubSource
+from document import Document
 
 
 class OmarchyReader(Gtk.Application):
     def __init__(self):
         super().__init__(application_id=APP_ID)
         self.book_path = None
-        self.source = None          # EpubSource for the currently open book
-        # Mirrors of source state used across the UI.
-        self.chapters = []
-        self._toc_books = []
+        self.doc = None             # Document (EpubSource + reading state)
         self._refs_overlay = None
         self._refs_pinned = None
         self._refs_panel_height = 240
         self._refs_tab = "notes"
         self._ref_tab_buttons = {}
-        self.chapter_index = 0
-        self.current_page = 0
-        self.current_ch = 0
-        self.page_count = 0
         self.font_size = 18
         self.reading_mode = "dark"
         self._toc_mode = "books"
@@ -65,10 +58,67 @@ class OmarchyReader(Gtk.Application):
         self._note_card_rows = []
         self._highlight_index = -1
         self._active_section = "content"
-        self._current_verse = 0
         self._on_home = False
         self._home_options = []
         self._home_sel = 0
+
+    # ---- Reading-state properties backed by Document (single source of truth) ----
+    @property
+    def source(self):
+        return self.doc.source if self.doc else None
+
+    @property
+    def chapters(self):
+        return self.doc.chapters if self.doc else []
+
+    @property
+    def _toc_books(self):
+        return self.doc.books if self.doc else []
+
+    @property
+    def chapter_index(self):
+        return self.doc.chapter_index if self.doc else 0
+
+    @chapter_index.setter
+    def chapter_index(self, value):
+        if self.doc:
+            self.doc.chapter_index = value
+
+    @property
+    def current_page(self):
+        return self.doc.page if self.doc else 0
+
+    @current_page.setter
+    def current_page(self, value):
+        if self.doc:
+            self.doc.page = value
+
+    @property
+    def current_ch(self):
+        return self.doc.char_offset if self.doc else 0
+
+    @current_ch.setter
+    def current_ch(self, value):
+        if self.doc:
+            self.doc.char_offset = value
+
+    @property
+    def page_count(self):
+        return self.doc.pages if self.doc else 0
+
+    @page_count.setter
+    def page_count(self, value):
+        if self.doc:
+            self.doc.pages = value
+
+    @property
+    def _current_verse(self):
+        return self.doc.verse if self.doc else 0
+
+    @_current_verse.setter
+    def _current_verse(self, value):
+        if self.doc:
+            self.doc.verse = value
 
     def do_command_line(self, command_line):
         options = command_line.get_arguments()
@@ -88,9 +138,9 @@ class OmarchyReader(Gtk.Application):
             self.open_book(path)
 
     def do_shutdown(self):
-        if self.source is not None:
-            self.source.close()
-            self.source = None
+        if self.doc is not None:
+            self.doc.close()
+            self.doc = None
         Gtk.Application.do_shutdown(self)
 
     def create_window(self):
@@ -356,11 +406,7 @@ class OmarchyReader(Gtk.Application):
 
     def _toc_locate_current_chapter(self):
         """Return (book_idx, chapter_in_book_idx) for the current chapter."""
-        for bi, book in enumerate(self._toc_books):
-            for ci, chapter in enumerate(book["chapters"]):
-                if chapter["index"] == self.chapter_index:
-                    return bi, ci
-        return 0, 0
+        return self.doc.locate() if self.doc else (0, 0)
 
     def _show_toc(self):
         if not self.chapters or not self._toc_books:
@@ -1011,28 +1057,18 @@ class OmarchyReader(Gtk.Application):
         save_notes(self.notes)
 
     def _note_key(self):
-        """Stable location key for the current book/chapter.
-
-        Uses the character offset into the chapter where the current page
-        starts (reported by the paginator), so notes stay anchored to the
-        text rather than to a page number that shifts with window size.
-        """
-        if not self.book_path or not self.chapters:
-            return None
-        book = os.path.basename(self.book_path)
-        return f"{book}|{self.chapter_index}|{self.current_ch}"
+        """Stable location key for the current book/chapter/page."""
+        return self.doc.note_key() if self.doc else None
 
     def _legacy_note_keys(self):
         """Older notes.json entries anchored by page number instead of char."""
-        if not self.book_path or not self.chapters:
-            return []
-        book = os.path.basename(self.book_path)
-        return [f"{book}|{self.chapter_index}|{self.current_page}"]
+        return self.doc.legacy_note_keys() if self.doc else []
 
     def _note_location_label(self):
+        if not self.doc:
+            return ""
         book = os.path.basename(self.book_path) if self.book_path else ""
-        name = _display_name(book) if book else ""
-        return f"{name} · ch {self.chapter_index + 1} · page {self.current_page + 1}"
+        return self.doc.location_label(_display_name(book) if book else "")
 
     def _toggle_notes(self):
         if self._notes_overlay.get_visible():
@@ -2093,25 +2129,18 @@ document.addEventListener('click', function (e) {{
     def _open_book_real(self, path):
         try:
             self._on_home = False
-            if self.source is not None:
-                self.source.close()
-            source = EpubSource(path)
-            if not source.load():
-                source.close()
+            if self.doc is not None:
+                self.doc.close()
+            doc = Document.open(path)
+            if doc is None:
                 self.show_welcome()
                 return False
-            self.source = source
+            self.doc = doc
             self.book_path = path
-            # Refresh UI mirrors of the parsed model.
-            self.chapters = source.chapters
-            self._toc_books = source.books
-            if not self.chapters:
-                self.show_welcome()
-                return False
             start = 0
             if getattr(self, "_resume_index", None) is not None:
-                start = min(self._resume_index, len(self.chapters) - 1)
-            self.chapter_index = start
+                start = min(self._resume_index, doc.chapter_count() - 1)
+            doc.chapter_index = start
             GLib.idle_add(self._do_load_chapter, start)
         except Exception as e:
             self.show_welcome()
@@ -2245,14 +2274,9 @@ document.addEventListener('click', function (e) {{
             print("JS error:", data.get("msg"), file=sys.stderr)
 
     def _save_state(self):
-        if not self.book_path:
+        if not self.doc or not self.book_path:
             return
-        filename = os.path.basename(self.book_path)
-        save_state({
-            "book": filename,
-            "chapter": self.chapter_index + 1,
-            "page": self.current_page + 1,
-        })
+        save_state(self.doc.to_state())
 
     def _continue_reading(self):
         state = load_state()
@@ -2300,14 +2324,16 @@ document.addEventListener('click', function (e) {{
 
     # ---------------- Navigation ----------------
     def next_chapter(self):
-        if self.chapter_index + 1 < len(self.chapters):
-            self._do_load_chapter(self.chapter_index + 1)
+        nxt = self.doc.next_index() if self.doc else None
+        if nxt is not None:
+            self._do_load_chapter(nxt)
             return True
         return False
 
     def prev_chapter(self):
-        if self.chapter_index - 1 >= 0:
-            self._do_load_chapter(self.chapter_index - 1)
+        prv = self.doc.prev_index() if self.doc else None
+        if prv is not None:
+            self._do_load_chapter(prv)
             return True
         return False
 
