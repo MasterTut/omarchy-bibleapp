@@ -53,6 +53,8 @@ class OmarchyReader(Gtk.Application):
         self._word_mode = False
         self._selected_word = ""
         self._word_verse = 0
+        self._word_index = 0
+        self._word_count = 0
         self._refs_panel_height = 240
         self._search_panel_height = 300
         self._refs_tab = "notes"
@@ -1104,14 +1106,17 @@ class OmarchyReader(Gtk.Application):
         verse = getattr(self, "_word_verse", 0) or self._current_verse or 1
         return bnum, cnum, verse
 
-    def _word_row(self, w):
+    def _word_row(self, w, index=0, active=False):
         strongs_code = w.get("strongs", "")
         entry = lexicon.strongs(strongs_code) or {}
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
         box.get_style_context().add_class("ref-card")
+        if active:
+            box.get_style_context().add_class("word-active")
         head = Gtk.Label()
         head.set_markup(
-            "<b>{}</b>  <span foreground='{}'>{} · {} {}</span>".format(
+            "{}<b>{}</b>  <span foreground='{}'>{} · {} {}</span>".format(
+                "\u25b8 " if active else "  ",
                 GLib.markup_escape_text(w.get("w", "")),
                 "#888888",
                 GLib.markup_escape_text(w.get("translit", "") or w.get("lemma", "")),
@@ -1121,25 +1126,15 @@ class OmarchyReader(Gtk.Application):
         )
         head.set_xalign(0.0)
         box.pack_start(head, False, False, 0)
-        gloss = entry.get("gloss") or entry.get("def") or ""
-        if gloss:
-            g = Gtk.Label(label=gloss)
+        detail = entry.get("def") if active else (entry.get("gloss") or "")
+        detail = detail or entry.get("gloss") or ""
+        if detail:
+            g = Gtk.Label(label=detail)
             g.set_xalign(0.0)
             g.set_line_wrap(True)
             g.get_style_context().add_class("progress-label")
             box.pack_start(g, False, False, 0)
-        btn = Gtk.Button()
-        btn.set_relief(Gtk.ReliefStyle.NONE)
-        btn.add(box)
-        btn.connect("clicked", lambda _b, wd=w: self._show_word_detail(wd))
-        self._refs_body.pack_start(btn, False, False, 0)
-
-    def _show_word_detail(self, w):
-        entry = lexicon.strongs(w.get("strongs", "")) or {}
-        self._ref_card(
-            w.get("strongs", ""),
-            f"{w.get('w','')} ({w.get('lemma','')}) — {entry.get('def') or entry.get('gloss') or ''}",
-        )
+        self._refs_body.pack_start(box, False, False, 0)
 
     def _open_uri(self, uri):
         """Open a file:// or http(s) URI with the system default handler."""
@@ -1224,9 +1219,13 @@ class OmarchyReader(Gtk.Application):
                         "is bundled in data/lexicon)."
                     )
                 else:
-                    self._ref_placeholder(f"{book_name} {cnum}:{verse} — tap a word for its gloss")
-                    for w in words:
-                        self._word_row(w)
+                    n = self._word_count or len(words)
+                    self._ref_placeholder(
+                        f"{book_name} {cnum}:{verse}  word "
+                        f"{min(self._word_index + 1, n)}/{n}   (h/l to cycle)"
+                    )
+                    for i, w in enumerate(words):
+                        self._word_row(w, i, i == self._word_index)
 
         self._refs_overlay.show_all()
         self._refs_overlay.set_visible(True)
@@ -1350,19 +1349,32 @@ class OmarchyReader(Gtk.Application):
 
     def _toggle_word_mode(self):
         self._word_mode = not self._word_mode
-        if not self._word_mode:
+        if self._word_mode:
+            self._word_index = 0
+            self._run_js("setWordMode(true); selectWordIndex(0);")
+            # Surface the interlinear for the current verse.
+            if self.doc and lexicon.interlinear(*self._inspect_ref()):
+                self._show_refs()
+                self._set_ref_tab("word")
+        else:
             self._selected_word = ""
-        self._run_js("setWordMode(%s);" % ("true" if self._word_mode else "false"))
+            self._word_index = self._word_count = 0
+            self._run_js("setWordMode(false);")
         self._update_header_focus()
 
-    def _on_word_selected(self, word, verse):
-        self._selected_word = (word or "").strip()
-        self._word_verse = int(verse or 0)
-        # Surface the interlinear for this verse in the Resources panel.
-        if self.doc and lexicon.interlinear(*self._inspect_ref()):
-            self._show_refs()
-            self._set_ref_tab("word")
+    def _word_step(self, delta):
+        if not self._word_mode:
+            return
+        self._run_js("selectWordIndex(%d);" % (self._word_index + delta))
+
+    def _on_wordpos(self, data):
+        self._word_index = int(data.get("index") or 0)
+        self._word_count = int(data.get("count") or 0)
+        self._selected_word = (data.get("text") or "").strip()
+        self._word_verse = int(data.get("verse") or 0)
+        self._refresh_refs()
         self._update_mode_line()
+
 
     def _panel_focus_state(self):
         focused = self._focus_in_text_input()
@@ -1849,7 +1861,7 @@ class OmarchyReader(Gtk.Application):
             ("Ctrl + Shift + K", "Keybindings reference"),
             ("Home", "Go to the library / choose a translation"),
             ("Ctrl + [", "Exit the notes editor back to tab select"),
-            ("i (content)", "Toggle word-study mode (click a word to inspect)"),
+            ("i (content)", "Word study: h/l cycle words, j/k verses, Word tab shows parse"),
             ("Ctrl + B", "Toggle reader mode"),
             ("Ctrl + I", "Import an EPUB into the library"),
             ("Ctrl + O", "Open a book file (in the reader)"),
@@ -2190,6 +2202,10 @@ class OmarchyReader(Gtk.Application):
                 border-left: 3px solid alpha({THEME["accent"]}, 0.8);
                 padding: 2px 0 2px 10px;
             }}
+            .ref-card.word-active {{
+                border-left: 3px solid {THEME["accent"]};
+                background-color: alpha({THEME["accent"]}, 0.16);
+            }}
             .ref-card label {{
                 color: {THEME["foreground"]};
             }}
@@ -2417,7 +2433,7 @@ class OmarchyReader(Gtk.Application):
             return "Ctrl+J content · 1-5 tabs · j/k scroll · h/l tabs"
         # content
         if self._word_mode:
-            return "i exit word mode · click a word to inspect"
+            return "h/l cycle words · j/k change verse · i exit word mode"
         tips = []
         if self._notes_overlay.get_visible():
             tips.append("Ctrl+J ⇄ Personal Space")
@@ -2868,6 +2884,10 @@ document.addEventListener('click', function (e) {{
             self._refs_pinned = None
             self._update_verse_label()
             self._refresh_refs()
+            if self._word_mode:
+                # Moved to a new verse -> start its word cycle at word 0.
+                self._word_index = 0
+                self._run_js("selectWordIndex(0);")
             self._refresh_notes()
         elif mtype == "ref":
             label = data.get("label", "")
@@ -2880,10 +2900,8 @@ document.addEventListener('click', function (e) {{
             self._refresh_refs()
         elif mtype == "memory_capture":
             self._memory_add(int(data.get("verse") or 0), data.get("text", ""))
-        elif mtype == "word":
-            self._on_word_selected(
-                data.get("text", ""), int(data.get("verse") or 0)
-            )
+        elif mtype == "wordpos":
+            self._on_wordpos(data)
         elif mtype == "edge":
             if data.get("dir") == "next":
                 self.next_chapter()
@@ -3274,8 +3292,12 @@ document.addEventListener('click', function (e) {{
             return False
 
         # Content focus: j/k/h/l/arrows are handled by the page's own JS (verse
-        # stepping + paging), so let them through. Space/Page keys page here.
+        # stepping + paging), so let them through. In word mode, h/l (and the
+        # arrow keys) walk the current verse word-by-word instead.
         if self._focus == "content":
+            if self._word_mode and kn in ("h", "l", "left", "right"):
+                self._word_step(1 if kn in ("l", "right") else -1)
+                return True
             if kn in ("j", "k", "up", "down", "h", "l", "left", "right"):
                 return False
             if kn == "page_down" or kn == "space":

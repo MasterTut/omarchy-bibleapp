@@ -476,54 +476,52 @@ document.addEventListener('click', function (e) {
   post({type: 'ref', label: label, text: text});
 });
 
-// ---- Word study mode (toggled with 'i' from Python) ----
-var wordMode = false;
+// ---- Word study mode: keyboard navigation via 'i' + h/l (no mouse) ----
+var wordMode = false, wordCount = 0, wordIndex = 0;
 function setWordMode(on) {
   wordMode = !!on;
   if (document.body) document.body.classList.toggle('word-mode', wordMode);
+  if (!wordMode) { try { window.getSelection().removeAllRanges(); } catch (e) {} }
 }
-function wordAt(x, y) {
-  var node = null, offset = 0;
-  if (document.caretRangeAtPoint) {
-    try { var rr = document.caretRangeAtPoint(x, y); if (rr) { node = rr.startContainer; offset = rr.startOffset; } } catch (e) {}
+function verseWordRanges() {
+  var el = currentVerseEl();
+  var container = el ? (el.closest('p') || el.parentNode) : document.querySelector('.page.active');
+  if (!container) return [];
+  var isW = function (c) { return /[A-Za-z0-9\u00C0-\u024F'’-]/.test(c); };
+  var ranges = [];
+  var walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT, null, false);
+  var node;
+  while ((node = walker.nextNode())) {
+    var t = node.nodeValue || '';
+    var i = 0;
+    while (i < t.length) {
+      if (isW(t[i])) {
+        var s = i;
+        while (i < t.length && isW(t[i])) i++;
+        ranges.push({ node: node, start: s, end: i, text: t.slice(s, i) });
+      } else { i++; }
+    }
   }
-  if ((!node || node.nodeType !== 3) && document.caretPositionFromPoint) {
-    var r = document.caretPositionFromPoint(x, y);
-    if (r) { node = r.offsetNode; offset = r.offset; }
-  }
-  if (!node || node.nodeType !== 3) return null;
-  var text = node.nodeValue || '';
-  if (!text.trim()) return null;
-  var isWord = function (c) { return /[A-Za-z0-9\u00C0-\u024F'’-]/.test(c); };
-  var pos = Math.min(offset, Math.max(0, text.length - 1));
-  if (!isWord(text[pos])) { var i = offset; while (i < text.length && !isWord(text[i])) i++; if (i >= text.length) return null; pos = i; }
-  if (!isWord(text[pos])) return null;
-  var start = pos, end = pos;
-  while (start > 0 && isWord(text[start - 1])) start--;
-  while (end < text.length && isWord(text[end])) end++;
-  if (start === end) return null;
-  // verse context: the nearest verse-numbered block containing the word
-  var verse = 0;
-  var block = node.parentElement ? node.parentElement.closest('p, li') : null;
-  var markers = document.querySelectorAll('.page.active [data-vn]');
-  for (var k = 0; k < markers.length; k++) {
-    if (markers[k].compareDocumentPosition(node) & Node.DOCUMENT_POSITION_FOLLOWING) {
-      verse = parseInt(markers[k].getAttribute('data-vn'), 10) || 0;
-    } else { break; }
-  }
-  return { word: text.slice(start, end), verse: verse, node: node, start: start, end: end };
+  return ranges;
 }
-document.addEventListener('click', function (e) {
-  if (!wordMode) return;
-  var w = wordAt(e.clientX, e.clientY);
-  if (!w) return;
-  e.preventDefault(); e.stopPropagation();
+// Select and report the nth word of the current verse (clamped).
+function selectWordIndex(idx) {
+  var r = verseWordRanges();
+  if (!r.length) { post({ type: 'wordpos', index: 0, count: 0, text: '', verse: currentVerseNum() }); return 0; }
+  if (idx < 0) idx = 0;
+  if (idx >= r.length) idx = r.length - 1;
+  wordIndex = idx; wordCount = r.length;
   try {
-    var rg = document.createRange(); rg.setStart(w.node, w.start); rg.setEnd(w.node, w.end);
+    var rg = document.createRange();
+    rg.setStart(r[idx].node, r[idx].start);
+    rg.setEnd(r[idx].node, r[idx].end);
     var s = window.getSelection(); s.removeAllRanges(); s.addRange(rg);
-  } catch (err) {}
-  post({ type: 'word', text: w.word, verse: w.verse });
-}, true);
+    if (r[idx].node.parentElement) r[idx].node.parentElement.scrollIntoView(false);
+  } catch (e) {}
+  post({ type: 'wordpos', index: idx, count: r.length, text: r[idx].text, verse: currentVerseNum() });
+  return r.length;
+}
+function clearWordSel() { try { window.getSelection().removeAllRanges(); } catch (e) {} }
 
 function showPage(idx) {
   if (!state.ready || state.pages === 0) return 0;
