@@ -15,6 +15,7 @@ Strong's datasets into the same schema later and it just works.
 import json
 import os
 import re
+import sys
 
 # Canonical English-book order (1..66) used to key the datasets.
 BOOKS = [
@@ -34,7 +35,10 @@ BOOKS = [
 _BOOK_INDEX = {b: i + 1 for i, b in enumerate(BOOKS)}
 
 _IS_TEST = "PYTEST_CURRENT_TEST" in os.environ
-_PKG_DIR = os.path.dirname(os.path.abspath(__file__))
+if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
+    _PKG_DIR = sys._MEIPASS
+else:
+    _PKG_DIR = os.path.dirname(os.path.abspath(__file__))
 _USER_DIR = os.path.expanduser("~/.config/omarchy-bible/lexicon")
 _REPO_DIR = os.path.join(_PKG_DIR, "data", "lexicon")
 

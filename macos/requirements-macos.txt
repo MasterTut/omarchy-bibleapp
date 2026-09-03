@@ -1,0 +1,5 @@
+# Python dependencies for building/running the app on macOS.
+# (GTK3/WebKitGTK/GI are installed via Homebrew — see macos/build_app.sh.)
+pyinstaller>=6.0
+ebooklib
+PyGObject

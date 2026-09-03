@@ -1,0 +1,87 @@
+# -*- mode: python ; coding: utf-8 -*-
+#
+# PyInstaller spec: builds Omarchy-Bible.app for macOS.
+# Run via macos/build_app.sh (which installs deps + runs pyinstaller).
+#
+# Bundles the source modules, the bundled translations/, and the offline
+# lexicon data/ so the frozen app needs no repo checkout at runtime.
+
+import sys
+from PyInstaller.utils.hooks import collect_all
+
+# Collect PyGObject repositories (GTK, WebKit) so the frozen binary can find
+# the GI typelibs + shared libs even when GTK is Homebrew-installed.
+datas, binaries, hiddenimports = [], [], []
+for repo in ("gi", "webkit2", "cairo", "cairo_gi"):
+    try:
+        r = collect_all(repo)
+    except Exception:
+        r = ([], [], [])
+    datas += r[0]
+    binaries += r[1]
+    hiddenimports += r[2]
+
+# Runtime data shipped inside the app bundle (translated into _MEIPASS at run
+# time by reader_config._root_dir() / lexicon frozen logic).
+datas += [
+    ("../translations", "translations"),
+    ("../data/lexicon", "data/lexicon"),
+]
+
+a = Analysis(
+    ["../main.py"],
+    pathex=[".."],
+    binaries=binaries,
+    datas=datas,
+    hiddenimports=hiddenimports + [
+        "gi", "gi.repository.Gtk", "gi.repository.Gdk",
+        "gi.repository.GdkPixbuf", "gi.repository.Gio", "gi.repository.Pango",
+        "gi.repository.WebKit2", "gi.repository.GLib", "gi.repository.cairo",
+    ],
+    hookspath=[],
+    runtime_hooks=[],
+    excludes=[],
+    noarchive=False,
+)
+
+pyz = PYZ(a.pure)
+
+exe = EXE(
+    pyz,
+    a.scripts,
+    exclude_binaries=True,
+    name="OmarchyBible",
+    debug=False,
+    bootloader_ignore_signals=False,
+    strip=False,
+    upx=False,
+    console=False,
+    disable_windowed_traceback=False,
+    argv_emulation=True,
+)
+
+# .app bundle (note: mac PyInstaller turns EXE into the bundle on macOS via
+# BUNDLE when the package is built on a Mac).
+coll = COLLECT(
+    exe,
+    a.binaries,
+    a.datas,
+    strip=False,
+    upx=False,
+    name="OmarchyBible",
+)
+
+app = BUNDLE(
+    exe,
+    name="Omarchy-Bible.app",
+    icon="org.omarchy.Bible.icns",
+    bundle_identifier="org.omarchy.Bible",
+    info_plist={
+        "CFBundleDisplayName": "Omarchy-Bible",
+        "CFBundleShortVersionString": "1.0.0",
+        "CFBundleVersion": "1.0.0",
+        "NSHighResolutionCapable": True,
+        "LSMinimumSystemVersion": "11.0",
+    },
+    version="1.0.0",
+)

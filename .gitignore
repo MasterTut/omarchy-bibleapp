@@ -1,4 +1,5 @@
 .venv/
+macos/.venv/
 __pycache__/
 *.pyc
 data/raw/

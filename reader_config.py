@@ -2,13 +2,26 @@
 import json
 import os
 import re
+import sys
 import tomllib
 
 
 APP_ID = "org.omarchy.Bible"
 
-# Where this project lives (used to locate bundled translations).
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+def _root_dir():
+    """Directory of the package source (or the PyInstaller bundle when frozen).
+
+    PyInstaller extracts bundled data to sys._MEIPASS, so resource lookups
+    must switch to that location when running as a frozen .app on macOS.
+    """
+    if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
+        return sys._MEIPASS
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+# Where bundled data lives (translations, lexicon, etc.).
+BASE_DIR = _root_dir()
 TRANSLATIONS_DIR = os.path.join(BASE_DIR, "translations")
 
 # User data dir for state + notes.
@@ -37,6 +50,11 @@ OMARCHY_STATE = os.path.expanduser("~/.local/state/omarchy")
 OMARCHY_CURRENT_THEME = os.path.join(OMARCHY_STATE, "current", "theme")
 OMARCHY_COLORS = os.path.join(OMARCHY_CURRENT_THEME, "colors.toml")
 
+# User-defined theme file. Provide this to theme the app on any platform
+# (including macOS) without Omarchy: precedence is user file > live omarchy
+# palette > built-in "Ash" default.
+USER_THEME_PATH = os.path.join(DATA_DIR, "theme.toml")
+
 
 def _parse_colors(text):
     colors = {}
@@ -47,29 +65,51 @@ def _parse_colors(text):
     return colors
 
 
-def load_theme():
-    """Read the currently applied omarchy theme colors into the global THEME.
-
-    Falls back to the Ash palette when the live palette is missing.
-    """
-    target = {}
+def _candidate_targets():
+    """Yield candidate colour dicts in ascending priority order."""
+    if os.path.isfile(USER_THEME_PATH):
+        try:
+            with open(USER_THEME_PATH, "r", encoding="utf-8") as fh:
+                colors = _parse_colors(fh.read())
+            if colors:
+                yield colors
+        except Exception:
+            pass
     if os.path.isfile(OMARCHY_COLORS):
         try:
             with open(OMARCHY_COLORS, "r", encoding="utf-8") as fh:
                 colors = _parse_colors(fh.read())
             if colors:
-                picked = {}
-                picked["background"] = colors.get("background")
-                picked["foreground"] = colors.get("foreground")
-                picked["accent"] = colors.get("accent")
-                picked["selection_background"] = colors.get("selection_background", colors.get("cursor"))
-                picked["selection_foreground"] = colors.get("selection_foreground", colors.get("background"))
-                picked["muted"] = colors.get("color11") or colors.get("color7")
-                picked["color11"] = picked["muted"]
-                target = {k: (v or DEFAULT_THEME[k]) for k, v in picked.items()}
+                yield colors
         except Exception:
-            target = dict(DEFAULT_THEME)
-    else:
+            pass
+
+
+def _pick(colors):
+    picked = {}
+    picked["background"] = colors.get("background")
+    picked["foreground"] = colors.get("foreground")
+    picked["accent"] = colors.get("accent")
+    picked["selection_background"] = colors.get("selection_background", colors.get("cursor"))
+    picked["selection_foreground"] = colors.get("selection_foreground", colors.get("background"))
+    picked["muted"] = colors.get("color11") or colors.get("color7")
+    picked["color11"] = picked["muted"]
+    return {k: (v or DEFAULT_THEME[k]) for k, v in picked.items()}
+
+
+def load_theme():
+    """Read theme colours into the global THEME.
+
+    Precedence: user theme file (~/.config/omarchy-bible/theme.toml) >
+    live omarchy palette > built-in Ash default. So themes work on any
+    platform, not only Omarchy.
+    """
+    target = None
+    for colors in _candidate_targets():
+        target = _pick(colors)
+        if target:
+            break
+    if target is None:
         target = dict(DEFAULT_THEME)
     THEME.clear()
     THEME.update(target)
