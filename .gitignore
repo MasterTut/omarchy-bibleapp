@@ -2,3 +2,7 @@
 __pycache__/
 *.pyc
 data/raw/
+
+# Do not distribute ESV translations (licensing restriction)
+translations/*ESV*
+translations/*English Standard Version*
