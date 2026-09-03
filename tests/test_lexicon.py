@@ -25,8 +25,8 @@ def run():
     agape = [w for w in jn if w["strongs"] == "G25"]
     assert agape and lexicon.strongs("G25")["gloss"]
 
-    # unknown verse -> empty, no crash
-    assert lexicon.interlinear(2, 1, 1) == []
+    # unknown verse -> empty, no crash (Genesis has no chapter 51)
+    assert lexicon.interlinear(1, 51, 1) == []
     assert lexicon.strongs("Z999") is None
     assert lexicon.strongs(None) is None
     print("ALL LEXICON TESTS PASSED")
