@@ -709,12 +709,10 @@ class OmarchyReader(Gtk.Application):
         tabbar.set_margin_end(16)
         tabbar.set_margin_bottom(8)
         self._ps_tabs = {}
-        for key, label in (
-            ("notes", "1. [ Notes ]"),
-            ("prayer", "2. [ Prayer ]"),
-            ("memory", "3. [ Memory ]"),
-        ):
-            b = Gtk.Button(label=label)
+        self._ps_tab_names = {}
+        for key, name in (("notes", "Notes"), ("prayer", "Prayer"), ("memory", "Memory")):
+            self._ps_tab_names[key] = name
+            b = Gtk.Button(label=self._tab_label(name, False))
             b.set_relief(Gtk.ReliefStyle.NONE)
             b.get_style_context().add_class("tab-btn")
             b.connect("clicked", lambda _w, k=key: self._set_ps_tab(k))
@@ -743,13 +741,15 @@ class OmarchyReader(Gtk.Application):
         self.notes_buffer = self.notes_textview.get_buffer()
         note_page.pack_start(self.notes_textview, True, True, 0)
         nrow = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-        add = Gtk.Button(label="Add")
+        add = Gtk.Button(label="[ ADD ]")
+        add.get_style_context().add_class("tab-btn")
         add.connect("clicked", self._on_note_add)
         nrow.pack_start(add, False, False, 0)
-        ndel = Gtk.Button(label="Delete")
+        ndel = Gtk.Button(label="[ DELETE ]")
+        ndel.get_style_context().add_class("tab-btn")
         ndel.connect("clicked", lambda *_: self._delete_current_note())
         nrow.pack_start(ndel, False, False, 0)
-        nhint = Gtk.Label(label="Ctrl+Enter add \u00b7 Ctrl+J to content \u00b7 1-3 tabs")
+        nhint = Gtk.Label(label="i edit \u00b7 Tab cycles \u00b7 Ctrl+Enter add \u00b7 Ctrl+J content")
         nhint.get_style_context().add_class("progress-label")
         nrow.pack_start(nhint, True, True, 0)
         note_page.pack_start(nrow, False, False, 0)
@@ -776,7 +776,8 @@ class OmarchyReader(Gtk.Application):
             self.prayer_freq.append_text(f.capitalize())
         self.prayer_freq.set_active(0)
         prow.pack_start(self.prayer_freq, False, False, 0)
-        padd = Gtk.Button(label="Add")
+        padd = Gtk.Button(label="[ ADD ]")
+        padd.get_style_context().add_class("tab-btn")
         padd.connect("clicked", lambda *_: self._prayer_add())
         prow.pack_start(padd, False, False, 0)
         prayer_page.pack_start(prow, False, False, 0)
@@ -794,10 +795,12 @@ class OmarchyReader(Gtk.Application):
         mscroller.add(self.memory_list)
         memory_page.pack_start(mscroller, True, True, 0)
         mrow = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-        madd = Gtk.Button(label="Add current verse")
+        madd = Gtk.Button(label="[ ADD VERSE ]")
+        madd.get_style_context().add_class("tab-btn")
         madd.connect("clicked", lambda *_: self._memory_add_current())
         mrow.pack_start(madd, False, False, 0)
-        self.memory_hide_btn = Gtk.ToggleButton(label="Hide text")
+        self.memory_hide_btn = Gtk.ToggleButton(label="[ HIDE TEXT ]")
+        self.memory_hide_btn.get_style_context().add_class("tab-btn")
         self.memory_hide_btn.connect("toggled", lambda *_: self._refresh_memory())
         mrow.pack_start(self.memory_hide_btn, False, False, 0)
         mhint = Gtk.Label(label="Follows you across books \u00b7 Space toggles")
@@ -854,14 +857,16 @@ class OmarchyReader(Gtk.Application):
         tabs.set_margin_end(16)
         tabs.set_margin_bottom(8)
         self._ref_tab_buttons = {}
-        for key, label in (
-            ("notes", "1. [ Study Notes ]"),
-            ("crossrefs", "2. [ Cross-Refs ]"),
-            ("intro", "3. [ Intro ]"),
-            ("images", "4. [ Images ]"),
-            ("links", "5. [ Links ]"),
+        self._ref_tab_names = {}
+        for key, name in (
+            ("notes", "Study Notes"),
+            ("crossrefs", "Cross-Refs"),
+            ("intro", "Intro"),
+            ("images", "Images"),
+            ("links", "Links"),
         ):
-            btn = Gtk.Button(label=label)
+            self._ref_tab_names[key] = name
+            btn = Gtk.Button(label=self._tab_label(name, False))
             btn.set_relief(Gtk.ReliefStyle.NONE)
             btn.get_style_context().add_class("tab-btn")
             btn.connect("clicked", lambda _b, k=key: self._set_ref_tab(k))
@@ -901,11 +906,16 @@ class OmarchyReader(Gtk.Application):
 
     def _sync_ref_tab_buttons(self):
         for key, btn in self._ref_tab_buttons.items():
+            active = key == self._refs_tab
             ctx = btn.get_style_context()
-            if key == self._refs_tab:
+            if active:
                 ctx.add_class("tab-active")
             else:
                 ctx.remove_class("tab-active")
+            btn.set_label(self._tab_label(self._ref_tab_names.get(key, key), active))
+
+    def _tab_label(self, name, active):
+        return ("[\u25b8 " if active else "[ ") + name + " ]"
 
     def _focus_in_refs(self):
         """True when keyboard focus is inside the Resources panel."""
@@ -1352,11 +1362,13 @@ class OmarchyReader(Gtk.Application):
         self._ps_tab = key
         self._ps_stack.set_visible_child_name(key)
         for k, b in self._ps_tabs.items():
+            active = k == key
             ctx = b.get_style_context()
-            if k == key:
+            if active:
                 ctx.add_class("tab-active")
             else:
                 ctx.remove_class("tab-active")
+            b.set_label(self._tab_label(self._ps_tab_names.get(k, k), active))
         if key == "notes":
             self._load_verse_note()
         elif key == "prayer":
@@ -1520,8 +1532,9 @@ class OmarchyReader(Gtk.Application):
             if not pending:
                 label.get_style_context().add_class("progress-label")
             row.pack_start(label, True, True, 0)
-            rm = Gtk.Button(label="Delete")
+            rm = Gtk.Button(label="[ DEL ]")
             rm.set_relief(Gtk.ReliefStyle.NONE)
+            rm.get_style_context().add_class("tab-btn")
             rm.connect("clicked", lambda _w, pid=p["id"]: self._prayer_remove(pid))
             row.pack_start(rm, False, False, 0)
             self.prayer_list.pack_start(row, False, False, 0)
@@ -1574,8 +1587,9 @@ class OmarchyReader(Gtk.Application):
             chk.set_active(m.get("done", False))
             chk.connect("toggled", lambda _w, k=m["key"]: self._memory_toggle(k))
             hrow.pack_start(chk, True, True, 0)
-            rm = Gtk.Button(label="Delete")
+            rm = Gtk.Button(label="[ DEL ]")
             rm.set_relief(Gtk.ReliefStyle.NONE)
+            rm.get_style_context().add_class("tab-btn")
             rm.connect("clicked", lambda _w, k=m["key"]: self._memory_remove(k))
             hrow.pack_start(rm, False, False, 0)
             box.pack_start(hrow, False, False, 0)
@@ -2111,6 +2125,7 @@ class OmarchyReader(Gtk.Application):
                 background-color: transparent;
                 border-radius: 0;
                 border: none;
+                border-bottom: 1px solid alpha({THEME["foreground"]}, 0.35);
                 padding: 4px 6px;
             }}
             textview text {{
@@ -2129,6 +2144,7 @@ class OmarchyReader(Gtk.Application):
                 font-size: {self.font_size}px;
                 background: transparent;
                 border: none;
+                border-bottom: 1px solid alpha({THEME["foreground"]}, 0.35);
                 box-shadow: none;
                 padding: 4px 2px;
                 color: {THEME["foreground"]};
@@ -2146,6 +2162,7 @@ class OmarchyReader(Gtk.Application):
                 background-color: transparent;
                 background-image: none;
                 border: none;
+                border-bottom: 1px solid alpha({THEME["foreground"]}, 0.35);
                 border-radius: 0;
                 box-shadow: none;
             }}
