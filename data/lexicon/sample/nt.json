@@ -1,0 +1,216 @@
+{
+  "43:3:16": [
+    {
+      "w": "Οὕτως",
+      "lemma": "οὕτως",
+      "translit": "houtōs",
+      "pos": "ADV",
+      "strongs": "G3779"
+    },
+    {
+      "w": "γὰρ",
+      "lemma": "γάρ",
+      "translit": "gar",
+      "pos": "CONJ",
+      "strongs": "G1063"
+    },
+    {
+      "w": "ἠγάπησεν",
+      "lemma": "ἀγαπάω",
+      "translit": "ēgapēsen",
+      "pos": "V-AAI-3S",
+      "strongs": "G25"
+    },
+    {
+      "w": "ὁ",
+      "lemma": "ὁ",
+      "translit": "ho",
+      "pos": "T-NMS",
+      "strongs": "G3588"
+    },
+    {
+      "w": "θεὸς",
+      "lemma": "θεός",
+      "translit": "theos",
+      "pos": "N-NMS",
+      "strongs": "G2316"
+    },
+    {
+      "w": "τὸν",
+      "lemma": "ὁ",
+      "translit": "ton",
+      "pos": "T-AMS",
+      "strongs": "G3588"
+    },
+    {
+      "w": "κόσμον",
+      "lemma": "κόσμος",
+      "translit": "kosmon",
+      "pos": "N-AMS",
+      "strongs": "G2889"
+    },
+    {
+      "w": "ὥστε",
+      "lemma": "ὥστε",
+      "translit": "hōste",
+      "pos": "CONJ",
+      "strongs": "G5613"
+    },
+    {
+      "w": "τὸν",
+      "lemma": "ὁ",
+      "translit": "ton",
+      "pos": "T-AMS",
+      "strongs": "G3588"
+    },
+    {
+      "w": "υἱὸν",
+      "lemma": "υἱός",
+      "translit": "huion",
+      "pos": "N-AMS",
+      "strongs": "G5207"
+    },
+    {
+      "w": "τὸν",
+      "lemma": "ὁ",
+      "translit": "ton",
+      "pos": "T-AMS",
+      "strongs": "G3588"
+    },
+    {
+      "w": "μονογενῆ",
+      "lemma": "μονογενής",
+      "translit": "monogenē",
+      "pos": "A-AMS",
+      "strongs": "G3439"
+    },
+    {
+      "w": "δοῦναι",
+      "lemma": "δίδωμι",
+      "translit": "dounai",
+      "pos": "V-AAN",
+      "strongs": "G1325"
+    }
+  ],
+  "43:1:1": [
+    {
+      "w": "Ἐν",
+      "lemma": "ἐν",
+      "translit": "en",
+      "pos": "PREP",
+      "strongs": "G1722"
+    },
+    {
+      "w": "ἀρχῇ",
+      "lemma": "ἀρχή",
+      "translit": "archē",
+      "pos": "N-DSF",
+      "strongs": "G746"
+    },
+    {
+      "w": "ἦν",
+      "lemma": "εἰμί",
+      "translit": "ēn",
+      "pos": "V-IIA-3S",
+      "strongs": "G1510"
+    },
+    {
+      "w": "ὁ",
+      "lemma": "ὁ",
+      "translit": "ho",
+      "pos": "T-NMS",
+      "strongs": "G3588"
+    },
+    {
+      "w": "λόγος",
+      "lemma": "λόγος",
+      "translit": "logos",
+      "pos": "N-NMS",
+      "strongs": "G3056"
+    },
+    {
+      "w": "καὶ",
+      "lemma": "καί",
+      "translit": "kai",
+      "pos": "CONJ",
+      "strongs": "G2532"
+    },
+    {
+      "w": "ὁ",
+      "lemma": "ὁ",
+      "translit": "ho",
+      "pos": "T-NMS",
+      "strongs": "G3588"
+    },
+    {
+      "w": "λόγος",
+      "lemma": "λόγος",
+      "translit": "logos",
+      "pos": "N-NMS",
+      "strongs": "G3056"
+    },
+    {
+      "w": "ἦν",
+      "lemma": "εἰμί",
+      "translit": "ēn",
+      "pos": "V-IIA-3S",
+      "strongs": "G1510"
+    },
+    {
+      "w": "πρὸς",
+      "lemma": "πρός",
+      "translit": "pros",
+      "pos": "PREP",
+      "strongs": "G4314"
+    },
+    {
+      "w": "τὸν",
+      "lemma": "ὁ",
+      "translit": "ton",
+      "pos": "T-AMS",
+      "strongs": "G3588"
+    },
+    {
+      "w": "θεόν",
+      "lemma": "θεός",
+      "translit": "theon",
+      "pos": "N-AMS",
+      "strongs": "G2316"
+    },
+    {
+      "w": "καὶ",
+      "lemma": "καί",
+      "translit": "kai",
+      "pos": "CONJ",
+      "strongs": "G2532"
+    },
+    {
+      "w": "θεὸς",
+      "lemma": "θεός",
+      "translit": "theos",
+      "pos": "N-NMS",
+      "strongs": "G2316"
+    },
+    {
+      "w": "ἦν",
+      "lemma": "εἰμί",
+      "translit": "ēn",
+      "pos": "V-IIA-3S",
+      "strongs": "G1510"
+    },
+    {
+      "w": "ὁ",
+      "lemma": "ὁ",
+      "translit": "ho",
+      "pos": "T-NMS",
+      "strongs": "G3588"
+    },
+    {
+      "w": "λόγος",
+      "lemma": "λόγος",
+      "translit": "logos",
+      "pos": "N-NMS",
+      "strongs": "G3056"
+    }
+  ]
+}

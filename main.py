@@ -30,6 +30,7 @@ from reader_assets import FONT_FAMILY, STYLESHEET, PAGE_JS, JS_HANDLER
 from document import Document
 import personalspace
 import verse_ref
+import lexicon
 
 
 class OmarchyReader(Gtk.Application):
@@ -51,6 +52,7 @@ class OmarchyReader(Gtk.Application):
         self._pending_verse = 0
         self._word_mode = False
         self._selected_word = ""
+        self._word_verse = 0
         self._refs_panel_height = 240
         self._search_panel_height = 300
         self._refs_tab = "notes"
@@ -869,6 +871,7 @@ class OmarchyReader(Gtk.Application):
             ("intro", "Intro"),
             ("images", "Images"),
             ("links", "Links"),
+            ("word", "Word"),
         ):
             self._ref_tab_names[key] = name
             btn = Gtk.Button(label=self._tab_label(name, False))
@@ -1090,6 +1093,54 @@ class OmarchyReader(Gtk.Application):
         card.pack_start(body, False, False, 0)
         self._refs_body.pack_start(card, False, False, 0)
 
+    def _inspect_ref(self):
+        """(book_index_1to66, chapter, verse) for the current word-study target."""
+        if not self.doc or not (0 <= self.chapter_index < len(self.chapters)):
+            return None, 0, 0
+        book_display = self.chapters[self.chapter_index][0] or ""
+        bnum = lexicon.book_number(book_display)
+        m = re.search(r"(\d+)\s*$", self.chapters[self.chapter_index][1] or "")
+        cnum = int(m.group(1)) if m else (self.chapter_index + 1)
+        verse = getattr(self, "_word_verse", 0) or self._current_verse or 1
+        return bnum, cnum, verse
+
+    def _word_row(self, w):
+        strongs_code = w.get("strongs", "")
+        entry = lexicon.strongs(strongs_code) or {}
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        box.get_style_context().add_class("ref-card")
+        head = Gtk.Label()
+        head.set_markup(
+            "<b>{}</b>  <span foreground='{}'>{} · {} {}</span>".format(
+                GLib.markup_escape_text(w.get("w", "")),
+                "#888888",
+                GLib.markup_escape_text(w.get("translit", "") or w.get("lemma", "")),
+                GLib.markup_escape_text(w.get("pos", "")),
+                GLib.markup_escape_text(strongs_code),
+            )
+        )
+        head.set_xalign(0.0)
+        box.pack_start(head, False, False, 0)
+        gloss = entry.get("gloss") or entry.get("def") or ""
+        if gloss:
+            g = Gtk.Label(label=gloss)
+            g.set_xalign(0.0)
+            g.set_line_wrap(True)
+            g.get_style_context().add_class("progress-label")
+            box.pack_start(g, False, False, 0)
+        btn = Gtk.Button()
+        btn.set_relief(Gtk.ReliefStyle.NONE)
+        btn.add(box)
+        btn.connect("clicked", lambda _b, wd=w: self._show_word_detail(wd))
+        self._refs_body.pack_start(btn, False, False, 0)
+
+    def _show_word_detail(self, w):
+        entry = lexicon.strongs(w.get("strongs", "")) or {}
+        self._ref_card(
+            w.get("strongs", ""),
+            f"{w.get('w','')} ({w.get('lemma','')}) — {entry.get('def') or entry.get('gloss') or ''}",
+        )
+
     def _open_uri(self, uri):
         """Open a file:// or http(s) URI with the system default handler."""
         try:
@@ -1163,6 +1214,19 @@ class OmarchyReader(Gtk.Application):
                     btn = Gtk.LinkButton(uri=lk["url"], label=lk["text"] or lk["url"])
                     btn.set_halign(Gtk.Align.START)
                     self._refs_body.pack_start(btn, False, False, 0)
+            elif tab == "word":
+                self.refs_loc.set_text(book_name)
+                bnum, cnum, verse = self._inspect_ref()
+                words = lexicon.interlinear(bnum, cnum, verse) if bnum else []
+                if not words:
+                    self._ref_placeholder(
+                        "No interlinear data for this verse yet (only a sample "
+                        "is bundled in data/lexicon)."
+                    )
+                else:
+                    self._ref_placeholder(f"{book_name} {cnum}:{verse} — tap a word for its gloss")
+                    for w in words:
+                        self._word_row(w)
 
         self._refs_overlay.show_all()
         self._refs_overlay.set_visible(True)
@@ -1293,8 +1357,11 @@ class OmarchyReader(Gtk.Application):
 
     def _on_word_selected(self, word, verse):
         self._selected_word = (word or "").strip()
-        # Hook for a future lexicon lookup: original-language (Greek/Hebrew)
-        # parsing + definition for this word in this verse.
+        self._word_verse = int(verse or 0)
+        # Surface the interlinear for this verse in the Resources panel.
+        if self.doc and lexicon.interlinear(*self._inspect_ref()):
+            self._show_refs()
+            self._set_ref_tab("word")
         self._update_mode_line()
 
     def _panel_focus_state(self):
@@ -3009,9 +3076,9 @@ document.addEventListener('click', function (e) {{
             if not shift and kn in ("1", "2", "3") and self._notes_overlay.get_visible():
                 self._set_ps_tab({"1": "notes", "2": "prayer", "3": "memory"}[kn])
                 return True
-            if shift and kn in ("1", "2", "3", "4", "5") and self._refs_overlay.get_visible():
+            if shift and kn in ("1", "2", "3", "4", "5", "6") and self._refs_overlay.get_visible():
                 key = {"1": "notes", "2": "crossrefs", "3": "intro",
-                       "4": "images", "5": "links"}[kn]
+                       "4": "images", "5": "links", "6": "word"}[kn]
                 self._set_ref_tab(key)
                 return True
             if not shift and kn == "r":
@@ -3149,11 +3216,11 @@ document.addEventListener('click', function (e) {{
 
         # Number keys switch tabs for the focused panel: 1-5 for Resources,
         # 1-3 for Personal Space (Notes / Prayer / Memory).
-        if not ctrl and not shift and kn in ("1", "2", "3", "4", "5"):
+        if not ctrl and not shift and kn in ("1", "2", "3", "4", "5", "6"):
             if self._focus == "refs":
                 key = {
                     "1": "notes", "2": "crossrefs", "3": "intro",
-                    "4": "images", "5": "links",
+                    "4": "images", "5": "links", "6": "word",
                 }.get(kn)
                 if key:
                     self._set_ref_tab(key)
