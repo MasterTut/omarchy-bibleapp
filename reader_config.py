@@ -90,7 +90,7 @@ DEFAULT_HOTKEYS = {
     "note": "Ctrl+p",
     "refs": "Ctrl+r",
     "import": "Ctrl+i",
-    "home_bracket": "Ctrl+bracketleft",
+    "home": "Home",
     "settings": "Ctrl+s",
     "cycle_section": "Ctrl+h/j/k/l",
     "help": "Ctrl+Shift+k",

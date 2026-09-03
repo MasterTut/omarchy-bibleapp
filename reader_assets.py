@@ -100,6 +100,12 @@ STYLESHEET = """
     border-left: 3px solid {accent};
     padding-left: 0.6em;
   }}
+  body.word-mode {{
+    cursor: crosshair;
+  }}
+  body.word-mode .page {{
+    user-select: none;
+  }}
   #container {{
     position: absolute;
     left: 0; right: 0; top: 0; bottom: 0;
@@ -469,6 +475,55 @@ document.addEventListener('click', function (e) {
   }
   post({type: 'ref', label: label, text: text});
 });
+
+// ---- Word study mode (toggled with 'i' from Python) ----
+var wordMode = false;
+function setWordMode(on) {
+  wordMode = !!on;
+  if (document.body) document.body.classList.toggle('word-mode', wordMode);
+}
+function wordAt(x, y) {
+  var node = null, offset = 0;
+  if (document.caretRangeAtPoint) {
+    try { var rr = document.caretRangeAtPoint(x, y); if (rr) { node = rr.startContainer; offset = rr.startOffset; } } catch (e) {}
+  }
+  if ((!node || node.nodeType !== 3) && document.caretPositionFromPoint) {
+    var r = document.caretPositionFromPoint(x, y);
+    if (r) { node = r.offsetNode; offset = r.offset; }
+  }
+  if (!node || node.nodeType !== 3) return null;
+  var text = node.nodeValue || '';
+  if (!text.trim()) return null;
+  var isWord = function (c) { return /[A-Za-z0-9\u00C0-\u024F'’-]/.test(c); };
+  var pos = Math.min(offset, Math.max(0, text.length - 1));
+  if (!isWord(text[pos])) { var i = offset; while (i < text.length && !isWord(text[i])) i++; if (i >= text.length) return null; pos = i; }
+  if (!isWord(text[pos])) return null;
+  var start = pos, end = pos;
+  while (start > 0 && isWord(text[start - 1])) start--;
+  while (end < text.length && isWord(text[end])) end++;
+  if (start === end) return null;
+  // verse context: the nearest verse-numbered block containing the word
+  var verse = 0;
+  var block = node.parentElement ? node.parentElement.closest('p, li') : null;
+  var markers = document.querySelectorAll('.page.active [data-vn]');
+  for (var k = 0; k < markers.length; k++) {
+    if (markers[k].compareDocumentPosition(node) & Node.DOCUMENT_POSITION_FOLLOWING) {
+      verse = parseInt(markers[k].getAttribute('data-vn'), 10) || 0;
+    } else { break; }
+  }
+  return { word: text.slice(start, end), verse: verse, node: node, start: start, end: end };
+}
+document.addEventListener('click', function (e) {
+  if (!wordMode) return;
+  var w = wordAt(e.clientX, e.clientY);
+  if (!w) return;
+  e.preventDefault(); e.stopPropagation();
+  try {
+    var rg = document.createRange(); rg.setStart(w.node, w.start); rg.setEnd(w.node, w.end);
+    var s = window.getSelection(); s.removeAllRanges(); s.addRange(rg);
+  } catch (err) {}
+  post({ type: 'word', text: w.word, verse: w.verse });
+}, true);
 
 function showPage(idx) {
   if (!state.ready || state.pages === 0) return 0;

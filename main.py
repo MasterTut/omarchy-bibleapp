@@ -49,6 +49,8 @@ class OmarchyReader(Gtk.Application):
         self._mode_chips = None
         self._mode_hint = None
         self._pending_verse = 0
+        self._word_mode = False
+        self._selected_word = ""
         self._refs_panel_height = 240
         self._search_panel_height = 300
         self._refs_tab = "notes"
@@ -671,6 +673,9 @@ class OmarchyReader(Gtk.Application):
         pages = getattr(self, "_page_pages", 0) or self.page_count
         if pages:
             text += f"   {self.current_page + 1}/{pages}"
+        if self._word_mode:
+            word = self._selected_word or "—"
+            text = f"word: {word}" + ("   " + title if title else "")
         return text
 
     # ---------------- Notes ----------------
@@ -801,7 +806,7 @@ class OmarchyReader(Gtk.Application):
         mrow.pack_start(madd, False, False, 0)
         self.memory_hide_btn = Gtk.ToggleButton(label="[ HIDE TEXT ]")
         self.memory_hide_btn.get_style_context().add_class("tab-btn")
-        self.memory_hide_btn.connect("toggled", lambda *_: self._refresh_memory())
+        self.memory_hide_btn.connect("toggled", self._on_memory_hide_toggled)
         mrow.pack_start(self.memory_hide_btn, False, False, 0)
         mhint = Gtk.Label(label="Follows you across books \u00b7 Space toggles")
         mhint.get_style_context().add_class("progress-label")
@@ -1279,6 +1284,19 @@ class OmarchyReader(Gtk.Application):
         delta = 1 if direction == "down" else -1
         self._run_js(f"moveVerse({delta});")
 
+    def _toggle_word_mode(self):
+        self._word_mode = not self._word_mode
+        if not self._word_mode:
+            self._selected_word = ""
+        self._run_js("setWordMode(%s);" % ("true" if self._word_mode else "false"))
+        self._update_header_focus()
+
+    def _on_word_selected(self, word, verse):
+        self._selected_word = (word or "").strip()
+        # Hook for a future lexicon lookup: original-language (Greek/Hebrew)
+        # parsing + definition for this word in this verse.
+        self._update_mode_line()
+
     def _panel_focus_state(self):
         focused = self._focus_in_text_input()
         ov = self._notes_overlay.get_style_context()
@@ -1559,6 +1577,10 @@ class OmarchyReader(Gtk.Application):
         save_memory(self.memory)
         self._refresh_memory()
 
+    def _on_memory_hide_toggled(self, btn):
+        btn.set_label("[\u25b8 HIDE TEXT ]" if btn.get_active() else "[ HIDE TEXT ]")
+        self._refresh_memory()
+
     def _memory_toggle(self, key):
         self.memory = personalspace.toggle_memory(self.memory, key)
         save_memory(self.memory)
@@ -1758,13 +1780,15 @@ class OmarchyReader(Gtk.Application):
             ("Ctrl + Shift + H", "Toggle header bar"),
             ("Ctrl + S", "Settings"),
             ("Ctrl + Shift + K", "Keybindings reference"),
-            ("Ctrl + [", "Home / choose a translation"),
+            ("Home", "Go to the library / choose a translation"),
+            ("Ctrl + [", "Exit the notes editor back to tab select"),
+            ("i (content)", "Toggle word-study mode (click a word to inspect)"),
             ("Ctrl + B", "Toggle reader mode"),
             ("Ctrl + I", "Import an EPUB into the library"),
             ("Ctrl + O", "Open a book file (in the reader)"),
             ("H / L / ← / →", "Previous / next page (left / right)"),
             ("J / K / ↑ / ↓", "Notes highlighted: move up / down · content: step verses (j/↓ down, k/↑ up)"),
-            ("Home: j/k, i, x", "Move selection · i imports · x removes a translation"),
+            ("Library: j/k, i, x", "Move selection · i imports · x removes a translation"),
             ("x (Home)", "Delete the highlighted translation"),
             ("Ctrl + Shift + +/-", "Grow / shrink the focused panel (Personal Space / Resources)"),
             ("Ctrl + Right / Ctrl + Left", "Traverse chapters"),
@@ -2325,11 +2349,14 @@ class OmarchyReader(Gtk.Application):
         if f == "refs":
             return "Ctrl+J content · 1-5 tabs · j/k scroll · h/l tabs"
         # content
+        if self._word_mode:
+            return "i exit word mode · click a word to inspect"
         tips = []
         if self._notes_overlay.get_visible():
             tips.append("Ctrl+J ⇄ Personal Space")
         elif self._refs_overlay is not None and self._refs_overlay.get_visible():
             tips.append("Ctrl+J ⇄ Resources")
+        tips.append("i word study")
         if not self._notes_overlay.get_visible():
             tips.append("Ctrl+P notes")
         if self._refs_overlay is not None and not self._refs_overlay.get_visible():
@@ -2719,6 +2746,8 @@ document.addEventListener('click', function (e) {{
             self._is_loading = False
             self._current_verse = 0
             self._refs_pinned = None
+            self._word_mode = False
+            self._selected_word = ""
             self._update_verse_label()
             self._refresh_refs()
             pages = data.get("pages", 0)
@@ -2784,6 +2813,10 @@ document.addEventListener('click', function (e) {{
             self._refresh_refs()
         elif mtype == "memory_capture":
             self._memory_add(int(data.get("verse") or 0), data.get("text", ""))
+        elif mtype == "word":
+            self._on_word_selected(
+                data.get("text", ""), int(data.get("verse") or 0)
+            )
         elif mtype == "edge":
             if data.get("dir") == "next":
                 self.next_chapter()
@@ -3030,8 +3063,11 @@ document.addEventListener('click', function (e) {{
             if self._hotkey_matches(HOTKEYS.get("settings"), keyname, state):
                 self._toggle_settings()
                 return True
-            if self._hotkey_matches(HOTKEYS.get("home_bracket"), keyname, state):
-                self.show_welcome()
+            if not shift and kn == "bracketleft":
+                # Ctrl+[ exits edit mode (e.g. the notes editor) back to the
+                # Personal Space tab/navigate state.
+                if self._ps_editing:
+                    self._exit_ps_edit()
                 return True
             if self._hotkey_matches(HOTKEYS.get("toggle_reader_mode"), keyname, state):
                 self._toggle_reader_mode()
@@ -3053,6 +3089,12 @@ document.addEventListener('click', function (e) {{
                 if not self._on_home:
                     self.on_open()
                 return True
+
+        # Physical Home key returns to the library (only when not typing — a
+        # focused text field consumes Home itself to jump the cursor).
+        if not ctrl and not shift and kn == "home":
+            self.show_welcome()
+            return True
 
         # Table of contents: arrow keys + Neo-Vim J/k navigation.
         # h/left goes back a level; l/right are consumed so they don't page the
@@ -3097,6 +3139,13 @@ document.addEventListener('click', function (e) {{
         # typing is done with Ctrl+1/2/3 (handled in the Ctrl block).
         if self._focus == "notes" and self._focus_in_text_input():
             return False
+
+        # 'i' in the reading content toggles word-study mode (highlight/capture
+        # individual words instead of whole verses) — groundwork for original-
+        # language lookups.
+        if not ctrl and not shift and kn == "i" and self._focus == "content" and self.chapters:
+            self._toggle_word_mode()
+            return True
 
         # Number keys switch tabs for the focused panel: 1-5 for Resources,
         # 1-3 for Personal Space (Notes / Prayer / Memory).
