@@ -487,11 +487,14 @@ function verseWordRanges() {
   var el = currentVerseEl();
   var container = el ? (el.closest('p') || el.parentNode) : document.querySelector('.page.active');
   if (!container) return [];
-  var isW = function (c) { return /[A-Za-z0-9\u00C0-\u024F'’-]/.test(c); };
+  var isW = function (c) { return /[A-Za-z0-9\u00C0-\u024F''-]/.test(c); };
   var ranges = [];
   var walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT, null, false);
   var node;
   while ((node = walker.nextNode())) {
+    var p = node.parentElement;
+    if (p && (p.tagName === 'SUP' || (p.getAttribute && p.getAttribute('class') || '').indexOf('v') >= 0)) continue;
+    if (p && p.tagName === 'A' && p.getAttribute('href') && /^#/.test(p.getAttribute('href'))) continue;
     var t = node.nodeValue || '';
     var i = 0;
     while (i < t.length) {
@@ -501,6 +504,9 @@ function verseWordRanges() {
         ranges.push({ node: node, start: s, end: i, text: t.slice(s, i) });
       } else { i++; }
     }
+  }
+  return ranges;
+}
   }
   return ranges;
 }
@@ -516,7 +522,17 @@ function selectWordIndex(idx) {
     rg.setStart(r[idx].node, r[idx].start);
     rg.setEnd(r[idx].node, r[idx].end);
     var s = window.getSelection(); s.removeAllRanges(); s.addRange(rg);
-    if (r[idx].node.parentElement) r[idx].node.parentElement.scrollIntoView(false);
+    var target = r[idx].node.parentElement;
+    if (target) {
+      target.scrollIntoView({block: 'nearest'});
+      var page = target.closest('.page');
+      if (page && page.scrollHeight > page.clientHeight) {
+        var tRect = target.getBoundingClientRect();
+        var pRect = page.getBoundingClientRect();
+        if (tRect.bottom > pRect.bottom) page.scrollTop += tRect.bottom - pRect.bottom + 20;
+        else if (tRect.top < pRect.top) page.scrollTop -= pRect.top - tRect.top + 20;
+      }
+    }
   } catch (e) {}
   post({ type: 'wordpos', index: idx, count: r.length, text: r[idx].text, verse: currentVerseNum() });
   return r.length;

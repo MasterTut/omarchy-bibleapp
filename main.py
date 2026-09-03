@@ -755,10 +755,6 @@ class OmarchyReader(Gtk.Application, TocMixin, SearchMixin, SettingsMixin, Resou
         if self._word_mode:
             self._word_index = 0
             self._run_js("setWordMode(true); selectWordIndex(0);")
-            # Surface the interlinear for the current verse.
-            if self.doc and lexicon.interlinear(*self._inspect_ref()):
-                self._show_refs()
-                self._set_ref_tab("word")
         else:
             self._selected_word = ""
             self._word_index = self._word_count = 0
@@ -776,6 +772,7 @@ class OmarchyReader(Gtk.Application, TocMixin, SearchMixin, SettingsMixin, Resou
         self._selected_word = (data.get("text") or "").strip()
         self._word_verse = int(data.get("verse") or 0)
         self._refresh_refs()
+        self._scroll_to_active_word()
         self._update_mode_line()
 
     def _panel_focus_state(self):
