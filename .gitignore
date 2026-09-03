@@ -3,6 +3,7 @@ __pycache__/
 *.pyc
 data/raw/
 
-# Do not distribute ESV translations (licensing restriction)
-translations/*ESV*
-translations/*English Standard Version*
+# Keep only ASV and KJV translations in the repo (all others ignored)
+translations/*
+!translations/ASV.epub
+!translations/KJV.epub
