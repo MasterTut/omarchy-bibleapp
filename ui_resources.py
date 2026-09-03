@@ -355,15 +355,16 @@ class ResourcesMixin:
                         "is bundled in data/lexicon)."
                     )
                 else:
-                    n = self._word_count or len(words)
-                    selected = self._selected_word or (words[self._word_index].get("w", "") if self._word_index < len(words) else "")
+                    n = len(words)
+                    idx = min(self._word_index, n - 1) if n else 0
+                    selected = self._selected_word or (words[idx].get("w", "") if n else "")
                     self._ref_placeholder(
                         f"{book_name} {cnum}:{verse}  "
                         f"\"{selected}\"  "
-                        f"({min(self._word_index + 1, n)}/{n} h/l)"
+                        f"({min(idx + 1, n)}/{n} h/l)"
                     )
                     for i, w in enumerate(words):
-                        self._word_row(w, i, i == self._word_index)
+                        self._word_row(w, i, i == idx)
 
         self._refs_overlay.show_all()
         self._refs_overlay.set_visible(True)

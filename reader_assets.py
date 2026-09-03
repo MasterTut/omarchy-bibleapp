@@ -488,6 +488,13 @@ function verseWordRanges() {
   var container = el ? (el.closest('p') || el.parentNode) : document.querySelector('.page.active');
   if (!container) return [];
   var isW = function (c) { return /[A-Za-z0-9\u00C0-\u024F''-]/.test(c); };
+  // English function words that carry no original-language word of their own,
+  // so we skip them to keep the content highlights aligned with the interlinear.
+  var stop = {'the':1,'and':1,'of':1,'to':1,'in':1,'a':1,'an':1,'is':1,
+              'that':1,'for':1,'was':1,'with':1,'as':1,'on':1,'be':1,'by':1,
+              'at':1,'from':1,'this':1,'shall':1,'his':1,'upon':1,'it':1,
+              'which':1,'he':1,'you':1,'i':1,'not':1,'but':1,'have':1,'had':1,
+              'will':1,'they':1,'them':1,'their':1,'are':1,'were':1,'who':1};
   var ranges = [];
   var walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT, null, false);
   var node;
@@ -502,7 +509,8 @@ function verseWordRanges() {
       if (isW(t[i])) {
         var s = i;
         while (i < t.length && isW(t[i])) i++;
-        ranges.push({ node: node, start: s, end: i, text: t.slice(s, i) });
+        var word = t.slice(s, i);
+        if (!stop[word.toLowerCase()]) ranges.push({ node: node, start: s, end: i, text: word });
       } else { i++; }
     }
   }
