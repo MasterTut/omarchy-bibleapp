@@ -486,7 +486,29 @@ function setWordMode(on) {
 // Number of original-language words for the current verse (the Resource-tab /
 // interlinear list). Word navigation follows this list, not every English word.
 var interCount = 0;
-function setVerseWords(n) { interCount = n || 0; }
+var interToEng = [];   // interlinear index -> English range index (or -1)
+function setVerseWords(n, engWords, mapping) {
+  interCount = n || 0;
+  // Mapping arrives parallel to the interlinear list. Re-index our English DOM
+  // ranges by matching each English word in order to build interlinear->range.
+  interToEng = [];
+  if (!mapping || !mapping.length || !engWords) { interToEng = []; return; }
+  interToEng = mapping.slice();
+  var r = verseWordRanges();
+  // Sanity: only trust the mapping if our English extraction matches in size.
+  if (r.length !== engWords.length) {
+    interToEng = [];
+  } else {
+    // Map English list index -> DOM range index (they are positional).
+    for (var k = 0; k < interToEng.length; k++) {
+      if (typeof interToEng[k] === 'number' && interToEng[k] >= 0 && interToEng[k] < r.length) {
+        interToEng[k] = interToEng[k];
+      } else {
+        interToEng[k] = -1;
+      }
+    }
+  }
+}
 function verseWordRanges() {
   var el = currentVerseEl();
   var container = el ? (el.closest('p') || el.parentNode) : document.querySelector('.page.active');
@@ -521,8 +543,8 @@ function verseWordRanges() {
   return ranges;
 }
 // Select and report the nth ORIGINAL-LANGUAGE word (interlinear index). It maps
-// to the nearest meaningful English content word via order-preserving alignment,
-// so navigation follows the Resource tab rather than every English word.
+// to the matching English content word via the gloss-based alignment computed in
+// Python, so navigation follows the Resource tab rather than every English word.
 function selectWordIndex(idx) {
   var r = verseWordRanges();
   var total = interCount > 0 ? interCount : r.length;
@@ -532,10 +554,15 @@ function selectWordIndex(idx) {
   wordIndex = idx; wordCount = total;
   var e = null;
   if (r.length > 0) {
-    // Order-preserving/proportional map: interlinear index -> English range index.
-    var ei = total <= 1 ? 0 : Math.round(idx * (r.length - 1) / (total - 1));
-    if (ei >= r.length) ei = r.length - 1;
-    e = r[ei];
+    var ei = -1;
+    if (interToEng.length) {
+      if (interToEng[idx] != null) ei = interToEng[idx];
+    } else {
+      // Fallback: order-preserving proportional position.
+      ei = total <= 1 ? 0 : Math.round(idx * (r.length - 1) / (total - 1));
+      if (ei >= r.length) ei = r.length - 1;
+    }
+    if (ei >= 0 && ei < r.length) e = r[ei];
   }
   if (e) {
     try {

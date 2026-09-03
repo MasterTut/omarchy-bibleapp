@@ -35,6 +35,10 @@ from document import Document
 import personalspace
 import verse_ref
 import lexicon
+import wordmatch
+
+import re as _re
+_VERSE_PARA_RE = _re.compile(r'<p[^>]*><sup[^>]*data-vn="(?P<vn>\d+)"[^>]*>.*?</sup>(?P<body>.*?)</p>', _re.S)
 
 class OmarchyReader(Gtk.Application, TocMixin, SearchMixin, SettingsMixin, ResourcesMixin):
     def __init__(self):
@@ -757,11 +761,45 @@ class OmarchyReader(Gtk.Application, TocMixin, SearchMixin, SettingsMixin, Resou
         bnum, cnum, verse = self._inspect_ref()
         return len(lexicon.interlinear(bnum, cnum, verse)) if bnum else 0
 
+    def _word_model_js(self):
+        """Return JS that installs the aligned word model for the current verse.
+
+        Sends the interlinear word list, the order/position of the English words
+        and the mapping (interlinear index -> English index, -1 = none), computed
+        with :func:`wordmatch.align` using Strong's glosses.
+        """
+        try:
+            import json as _json
+            if not self.source or not self.chapters:
+                return "setVerseWords(0,[],[]);"
+            bnum, cnum, verse = self._inspect_ref()
+            inter = lexicon.interlinear(bnum, cnum, verse) if bnum else []
+            eng = wordmatch.non_stop_words(self._verse_english_text(verse))
+            mapping = wordmatch.align(eng, inter)
+            return "setVerseWords(%d,%s,%s);" % (
+                len(inter), _json.dumps(eng), _json.dumps(mapping),
+            )
+        except Exception:
+            return "setVerseWords(0,[],[]);"
+
+    def _verse_english_text(self, verse):
+        """Return the plain English text of a verse of the current chapter."""
+        try:
+            html = self.source.chapter_html(self.chapter_index)
+            for m in _VERSE_PARA_RE.finditer(html):
+                if int(m.group("vn")) == verse:
+                    return re.sub(r"<[^>]+>", "", m.group("body"))
+        except Exception:
+            pass
+        return ""
+
     def _toggle_word_mode(self):
         self._word_mode = not self._word_mode
         if self._word_mode:
             self._word_index = 0
-            self._run_js("setWordMode(true); setVerseWords(%d); selectWordIndex(0);" % self._word_total())
+            self._run_js(
+                "setWordMode(true); " + self._word_model_js() + " selectWordIndex(0);"
+            )
         else:
             self._selected_word = ""
             self._word_index = self._word_count = 0
@@ -1962,7 +2000,7 @@ document.addEventListener('click', function (e) {{
                 # Moved to a new verse -> start its word cycle at word 0,
                 # following the interlinear (resource-tab) list.
                 self._word_index = 0
-                self._run_js("selectWordIndex(0); setVerseWords(%d);" % self._word_total())
+                self._run_js("selectWordIndex(0); " + self._word_model_js())
             self._refresh_notes()
         elif mtype == "ref":
             label = data.get("label", "")
