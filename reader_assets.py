@@ -483,43 +483,110 @@ function setWordMode(on) {
   if (document.body) document.body.classList.toggle('word-mode', wordMode);
   if (!wordMode) { try { window.getSelection().removeAllRanges(); } catch (e) {} }
 }
+// Number of original-language words for the current verse (the Resource-tab /
+// interlinear list). Word navigation follows this list, not every English word.
+var interCount = 0;
+var interToEng = [];   // interlinear index -> English range index (or -1)
+function setVerseWords(n, engWords, mapping) {
+  interCount = n || 0;
+  // Mapping arrives parallel to the interlinear list. Re-index our English DOM
+  // ranges by matching each English word in order to build interlinear->range.
+  interToEng = [];
+  if (!mapping || !mapping.length || !engWords) { interToEng = []; return; }
+  interToEng = mapping.slice();
+  var r = verseWordRanges();
+  // Sanity: only trust the mapping if our English extraction matches in size.
+  if (r.length !== engWords.length) {
+    interToEng = [];
+  } else {
+    // Map English list index -> DOM range index (they are positional).
+    for (var k = 0; k < interToEng.length; k++) {
+      if (typeof interToEng[k] === 'number' && interToEng[k] >= 0 && interToEng[k] < r.length) {
+        interToEng[k] = interToEng[k];
+      } else {
+        interToEng[k] = -1;
+      }
+    }
+  }
+}
 function verseWordRanges() {
   var el = currentVerseEl();
   var container = el ? (el.closest('p') || el.parentNode) : document.querySelector('.page.active');
   if (!container) return [];
-  var isW = function (c) { return /[A-Za-z0-9\u00C0-\u024F'’-]/.test(c); };
+  var isW = function (c) { return /[A-Za-z0-9\u00C0-\u024F''-]/.test(c); };
+  // English function words that carry no original-language word of their own,
+  // so we skip them to keep content highlights aligned with the interlinear.
+  var stop = {'the':1,'and':1,'of':1,'to':1,'in':1,'a':1,'an':1,'is':1,
+              'that':1,'for':1,'was':1,'with':1,'as':1,'on':1,'be':1,'by':1,
+              'at':1,'from':1,'this':1,'shall':1,'his':1,'upon':1,'it':1,
+              'which':1,'he':1,'you':1,'i':1,'not':1,'but':1,'have':1,'had':1,
+              'will':1,'they':1,'them':1,'their':1,'are':1,'were':1,'who':1};
   var ranges = [];
   var walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT, null, false);
   var node;
   while ((node = walker.nextNode())) {
+    var p = node.parentElement;
+    if (p && p.tagName === 'SUP') continue;
+    if (p && p.classList && p.classList.contains('v')) continue;
+    if (p && p.tagName === 'A' && p.getAttribute('href') && /^#/.test(p.getAttribute('href'))) continue;
     var t = node.nodeValue || '';
     var i = 0;
     while (i < t.length) {
       if (isW(t[i])) {
         var s = i;
         while (i < t.length && isW(t[i])) i++;
-        ranges.push({ node: node, start: s, end: i, text: t.slice(s, i) });
+        var word = t.slice(s, i);
+        if (!stop[word.toLowerCase()]) ranges.push({ node: node, start: s, end: i, text: word });
       } else { i++; }
     }
   }
   return ranges;
 }
-// Select and report the nth word of the current verse (clamped).
+// Select and report the nth ORIGINAL-LANGUAGE word (interlinear index). It maps
+// to the matching English content word via the gloss-based alignment computed in
+// Python, so navigation follows the Resource tab rather than every English word.
 function selectWordIndex(idx) {
   var r = verseWordRanges();
-  if (!r.length) { post({ type: 'wordpos', index: 0, count: 0, text: '', verse: currentVerseNum() }); return 0; }
+  var total = interCount > 0 ? interCount : r.length;
+  if (total === 0) { post({ type: 'wordpos', index: 0, count: 0, text: '', verse: currentVerseNum() }); return 0; }
   if (idx < 0) idx = 0;
-  if (idx >= r.length) idx = r.length - 1;
-  wordIndex = idx; wordCount = r.length;
-  try {
-    var rg = document.createRange();
-    rg.setStart(r[idx].node, r[idx].start);
-    rg.setEnd(r[idx].node, r[idx].end);
-    var s = window.getSelection(); s.removeAllRanges(); s.addRange(rg);
-    if (r[idx].node.parentElement) r[idx].node.parentElement.scrollIntoView(false);
-  } catch (e) {}
-  post({ type: 'wordpos', index: idx, count: r.length, text: r[idx].text, verse: currentVerseNum() });
-  return r.length;
+  if (idx >= total) idx = total - 1;
+  wordIndex = idx; wordCount = total;
+  var e = null;
+  if (r.length > 0) {
+    var ei = -1;
+    if (interToEng.length) {
+      if (interToEng[idx] != null) ei = interToEng[idx];
+    } else {
+      // Fallback: order-preserving proportional position.
+      ei = total <= 1 ? 0 : Math.round(idx * (r.length - 1) / (total - 1));
+      if (ei >= r.length) ei = r.length - 1;
+    }
+    if (ei >= 0 && ei < r.length) e = r[ei];
+  }
+  if (e) {
+    try {
+      var rg = document.createRange();
+      rg.setStart(e.node, e.start);
+      rg.setEnd(e.node, e.end);
+      var s = window.getSelection(); s.removeAllRanges(); s.addRange(rg);
+      var target = e.node.parentElement;
+      if (target) {
+        target.scrollIntoView({block: 'nearest'});
+        var page = target.closest('.page');
+        if (page && page.scrollHeight > page.clientHeight) {
+          var tRect = target.getBoundingClientRect();
+          var pRect = page.getBoundingClientRect();
+          if (tRect.bottom > pRect.bottom) page.scrollTop += tRect.bottom - pRect.bottom + 20;
+          else if (tRect.top < pRect.top) page.scrollTop -= pRect.top - tRect.top + 20;
+        }
+      }
+    } catch (err) {}
+  } else {
+    try { window.getSelection().removeAllRanges(); } catch (err) {}
+  }
+  post({ type: 'wordpos', index: idx, count: total, text: e ? e.text : '', verse: currentVerseNum() });
+  return total;
 }
 function clearWordSel() { try { window.getSelection().removeAllRanges(); } catch (e) {} }
 

@@ -14,6 +14,7 @@ Strong's datasets into the same schema later and it just works.
 """
 import json
 import os
+import re
 
 # Canonical English-book order (1..66) used to key the datasets.
 BOOKS = [
@@ -74,19 +75,50 @@ def _ensure():
         _STRONGS = _load("strongs.json")
 
 
+_SIMPLE_SINGLETONS = {"psalm": "Psalms", "the psalms": "Psalms",
+                      "psalms": "Psalms"}
+_ROMAN_PLURALS = {
+    "corinthians": "Corinthians", "thessalonians": "Thessalonians",
+    "timothy": "Timothy", "john": "John", "peter": "Peter",
+    "kings": "Kings", "chronicles": "Chronicles", "samuel": "Samuel",
+}
+_ROMAN = {"i": 1, "ii": 2, "iii": 3, "iv": 4, "v": 5, "vi": 6, "vii": 7,
+          "viii": 8}
+
+
+def _normalize_book(token):
+    """Return a canonical book name from a fuzzy title, or None."""
+    if not token:
+        return None
+    t = re.sub(r"\s+", " ", token.strip()).lower().rstrip(".,;:()")
+    # "The ..." / "The Book of ..." / "Book of ..."
+    t = re.sub(r"^(the\s+)?(book\s+of\s+)?", "", t)
+    if t in _SIMPLE_SINGLETONS:
+        return _SIMPLE_SINGLETONS[t]
+    if t in ("song", "song of songs"):
+        return "Song of Solomon"
+    words = t.split()
+    # Roman-numeral ordinal prefix, e.g. "ii corinthians" -> "2 Corinthians"
+    if words and words[0].rstrip(".") in _ROMAN:
+        num = _ROMAN[words[0].rstrip(".")]
+        rest = " ".join(words[1:])
+        if rest in _ROMAN_PLURALS:
+            return "%d %s" % (num, _ROMAN_PLURALS[rest])
+    books_l = {b.lower(): b for b in BOOKS}
+    # longest-first so "song of solomon" wins over "song"
+    for bk in sorted(books_l, key=len, reverse=True):
+        if t.endswith(bk):
+            return books_l[bk]
+    return None
+
+
 def book_number(display_name):
     """Canonical 1..66 index for an English book display name, or None."""
     if not display_name:
         return None
-    n = display_name.strip().lower()
-    for b, num in _BOOK_INDEX.items():
-        if b.lower() == n:
-            return num
-    # tolerate variants like "Psalm"/"The Psalms"/"Song of Songs"
-    if n in ("psalm", "the psalms"):
-        return _BOOK_INDEX["Psalms"]
-    if n in ("song of songs", "song"):
-        return _BOOK_INDEX["Song of Solomon"]
+    canon = _normalize_book(display_name)
+    if canon:
+        return _BOOK_INDEX.get(canon)
     return None
 
 

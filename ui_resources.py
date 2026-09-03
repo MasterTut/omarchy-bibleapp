@@ -93,7 +93,9 @@ class ResourcesMixin:
         self._refresh_refs()
         self._focus_refs()
     def _next_ref_tab(self, delta):
-        order = list(self._ref_tab_buttons.keys())
+        order = [k for k in self._ref_tab_buttons if self._ref_tab_buttons[k].get_visible()]
+        if not order:
+            return None
         if self._refs_tab not in order:
             return order[0]
         idx = (order.index(self._refs_tab) + delta) % len(order)
@@ -106,7 +108,11 @@ class ResourcesMixin:
                 ctx.add_class("tab-active")
             else:
                 ctx.remove_class("tab-active")
-            btn.set_label(self._tab_label(self._ref_tab_names.get(key, key), active))
+            if key == "word" and self._refs_overlay and self._refs_overlay.get_visible():
+                name = self._get_word_tab_label()
+            else:
+                name = self._ref_tab_names.get(key, key)
+            btn.set_label(self._tab_label(name, active))
     def _tab_label(self, name, active):
         return ("[\u25b8 " if active else "[ ") + name + " ]"
     def _focus_in_refs(self):
@@ -222,12 +228,65 @@ class ResourcesMixin:
                 Gio.AppInfo.launch_default_for_uri(uri, None)
         except Exception:
             GLib.spawn_command_line_async(f"xdg-open {shlex.quote(uri)}")
+    def _get_tab_data_counts(self):
+        """Return {tab_key: count} for the current chapter/verse."""
+        verse = getattr(self, "_current_verse", 0)
+        book_name = self.chapters[self.chapter_index][0] if 0 <= self.chapter_index < len(self.chapters) else ""
+        counts = {}
+        if self.source:
+            if verse:
+                allrefs = self.source.refs(self.chapter_index)
+                counts["notes"] = len([e for e in allrefs.get(verse, []) if e.get("kind", "notes") == "notes"])
+                counts["crossrefs"] = len([e for e in allrefs.get(verse, []) if e.get("kind", "notes") == "crossrefs"])
+            intro, images, links = self.source.resources(self.chapter_index)
+            counts["intro"] = 1 if intro.strip() else 0
+            counts["images"] = len(images)
+            counts["links"] = len(links)
+        bnum, cnum, v = self._inspect_ref()
+        words = lexicon.interlinear(bnum, cnum, v) if bnum else []
+        counts["word"] = len(words)
+        return counts
+
+    def _get_word_tab_label(self):
+        bnum, _, _ = self._inspect_ref()
+        if bnum and lexicon.is_ot(bnum):
+            return "Hebrew"
+        return "Greek"
+
+    def _scroll_to_active_word(self):
+        if not self._refs_overlay or not self._refs_overlay.get_visible():
+            return
+        if self._refs_tab != "word":
+            return
+        for child in self._refs_body.get_children():
+            if child.get_style_context().has_class("word-active"):
+                adj = self._refs_scroller.get_vadjustment()
+                alloc = child.get_allocation()
+                page_h = adj.get_page_size()
+                cur = adj.get_value()
+                if alloc.y < cur:
+                    adj.set_value(alloc.y)
+                elif alloc.y + alloc.height > cur + page_h:
+                    adj.set_value(alloc.y + alloc.height - page_h + 8)
+                break
+
     def _refresh_refs(self):
         """Re-render the Resources panel for the current tab + verse."""
         if self._refs_overlay is None or not self._refs_overlay.get_visible():
             return
         for child in self._refs_body.get_children():
             self._refs_body.remove(child)
+
+        counts = self._get_tab_data_counts()
+        for key, btn in self._ref_tab_buttons.items():
+            btn.set_visible(counts.get(key, 0) > 0)
+        order = [k for k in self._ref_tab_buttons if counts.get(k, 0) > 0]
+        if self._refs_tab not in order:
+            self._refs_tab = order[0] if order else "notes"
+        self._sync_ref_tab_buttons()
+        if not order:
+            self._hide_refs()
+            return
 
         tab = self._refs_tab
         verse = getattr(self, "_current_verse", 0)
@@ -286,7 +345,8 @@ class ResourcesMixin:
                     btn.set_halign(Gtk.Align.START)
                     self._refs_body.pack_start(btn, False, False, 0)
             elif tab == "word":
-                self.refs_loc.set_text(book_name)
+                lang = self._get_word_tab_label()
+                self.refs_loc.set_text(f"{book_name} {lang}")
                 bnum, cnum, verse = self._inspect_ref()
                 words = lexicon.interlinear(bnum, cnum, verse) if bnum else []
                 if not words:
@@ -295,18 +355,25 @@ class ResourcesMixin:
                         "is bundled in data/lexicon)."
                     )
                 else:
-                    n = self._word_count or len(words)
+                    n = len(words)
+                    idx = min(self._word_index, n - 1) if n else 0
+                    selected = self._selected_word or (words[idx].get("w", "") if n else "")
                     self._ref_placeholder(
-                        f"{book_name} {cnum}:{verse}  word "
-                        f"{min(self._word_index + 1, n)}/{n}   (h/l to cycle)"
+                        f"{book_name} {cnum}:{verse}  "
+                        f"\"{selected}\"  "
+                        f"({min(idx + 1, n)}/{n} h/l)"
                     )
                     for i, w in enumerate(words):
-                        self._word_row(w, i, i == self._word_index)
+                        self._word_row(w, i, i == idx)
 
         self._refs_overlay.show_all()
         self._refs_overlay.set_visible(True)
+        for key, btn in self._ref_tab_buttons.items():
+            btn.set_visible(counts.get(key, 0) > 0)
         self._position_refs_above_notes()
         self._sync_ref_tab_buttons()
+        if tab == "word":
+            GLib.idle_add(self._scroll_to_active_word)
     def _apply_refs_height(self, height):
         """Set the height of the references panel."""
         self._refs_panel_height = int(height)

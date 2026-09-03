@@ -180,7 +180,7 @@ class EpubSource:
             book_chapters = []
             for ch_title, path, name in chs:
                 idx = len(self.chapters)
-                self.chapters.append(("", ch_title, path, name))
+                self.chapters.append((book_title, ch_title, path, name))
                 book_chapters.append({"title": ch_title, "index": idx})
             self.books.append({"title": book_title, "chapters": book_chapters})
 

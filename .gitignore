@@ -2,3 +2,8 @@
 __pycache__/
 *.pyc
 data/raw/
+
+# Keep only ASV and KJV translations in the repo (all others ignored)
+translations/*
+!translations/ASV.epub
+!translations/KJV.epub
