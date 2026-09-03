@@ -92,18 +92,40 @@ typography and layout while staying true to the Omarchy look.
 
 ## Install & run
 
-```bash
-# create the virtualenv (uses system PyGObject/WebKit via --system-site-packages)
-python3 -m venv --system-site-packages .venv
-.venv/bin/pip install ebooklib
+The bundled installer provisions system packages (via your package manager),
+creates the project virtualenv, installs the Python deps, and wires up the
+`omarchy-bible` command plus (on Linux) the desktop entry + icon.
 
-# run
+```bash
+./install.sh              # current user (~/.local)
+./install.sh --system     # system-wide (needs sudo)
+```
+
+Then run:
+
+```bash
+omarchy-bible                      # home screen
+omarchy-bible /path/to/book.epub   # open a book directly
+# or from the repo:
 ./run.sh
-# or open a book directly
-./run.sh /path/to/book.epub
 ```
 
 Within the app, use **Open Book** in the header or `Ctrl+O`.
+
+Users bring their own EPUB translations. Drop public-domain EPUBs (e.g. ASV,
+KJV) into `translations/` (see `.gitignore` — only ASV and KJV are tracked).
+
+## Theming
+
+The app reads its colour palette with this precedence:
+
+1. `~/.config/omarchy-bible/theme.toml` (user-defined — works on any platform)
+2. the live Omarchy palette (`~/.local/state/omarchy/current/theme/colors.toml`)
+3. the built-in Ash default
+
+Copy `theme.toml.example` to `~/.config/omarchy-bible/theme.toml` to set your
+own colours — this is the recommended way to theme the app on macOS (or any
+non-Omarchy system) where the Omarchy live palette is not present.
 
 ## Layout
 

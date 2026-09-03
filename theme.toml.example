@@ -1,0 +1,13 @@
+# Omarchy-Bible user theme.
+#
+# Copy to ~/.config/omarchy-bible/theme.toml to theme the app on any
+# platform (including macOS, where the Omarchy live palette is absent).
+# Each value is an HTML/CSS colour. Omit a key to fall back to the
+# built-in Ash default.
+
+background = "#121212"
+foreground = "#e0e0e0"
+accent = "#626262"
+selection_background = "#e0e0e0"
+selection_foreground = "#121212"
+muted = "#b2b2b2"
