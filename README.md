@@ -31,6 +31,11 @@ typography and layout while staying true to the Omarchy look.
   study Bibles (e.g. Crossway ESV) it surfaces the per-book introduction,
   images/maps/charts (click to open in your viewer), and external web links
   (click to open in your browser)
+- **Offline original-language word study** (`i` in the reader): enter word mode
+  and step through the Hebrew (OT) or Greek (NT) words of the current verse with
+  `h`/`l`; the **Word** tab of the Resources panel shows each word's original
+  script, transliteration, parsing, Strong's number and definition. The
+  interlinear + Strong's data ships offline under `data/lexicon/`
 - Paragraphs are automatically split so each verse appears on its own line
   (Crossway-style EPUBs with many verses per paragraph are reformatted on load)
 - Notes record the highlighted verse next to the timestamp (`… · v. 5`);
@@ -52,8 +57,8 @@ typography and layout while staying true to the Omarchy look.
   navigate (default — `Tab`/`1-3`/`h`/`l` switch tabs, `i` enters the field)
   and edit (typing; `Esc` back to navigate; `Ctrl+Enter` saves a note)
 - `Ctrl + R` — Resources panel above the notes: **1 Notes · 2 Cross-refs ·
-  3 Intro · 4 Images · 5 Links**. When focused, `j`/`k` scroll it and `h`/`l`
-  switch tabs (this does not move your place in the reading content);
+  3 Intro · 4 Images · 5 Links · 6 Word**. When focused, `j`/`k` scroll it and
+  `h`/`l` switch tabs (this does not move your place in the reading content);
   `Ctrl + Shift + +/-` resizes it
 - `Ctrl + S` — settings
 - `Ctrl + h` / `Ctrl + l` — focus the Personal Space notes editor
@@ -103,9 +108,43 @@ Within the app, use **Open Book** in the header or `Ctrl+O`.
 ## Layout
 
 ```
-main.py   # the entire application (parser + GTK UI + pagination engine)
-run.sh    # launcher that uses the project virtualenv
+main.py             # app shell: window, dock, mode line, key handling, navigation
+ui_toc.py           # books → chapters → verses table-of-contents overlay (mixins)
+ui_resources.py     # tabbed Resources panel (notes / cross-refs / word study)
+ui_settings.py      # settings + keybinding-reference overlays
+ui_search.py        # "go to passage" search overlay
+lexicon.py          # offline interlinear + Strong's lookup (GTK-free)
+document.py         # reading state (single source of truth)
+epubsource.py       # EPUB parsing into books/chapters/verses (+ assets)
+epubtext.py         # chapter → paginated HTML rendering
+personalspace.py    # notes / prayer / memory persistence
+verse_ref.py        # passage-reference parsing
+reader_config.py    # settings + theme helpers
+reader_assets.py    # stylesheet + page JS
+scripts/prepare_lexicon.py  # regenerates data/lexicon/*.json from data/raw/*
+run.sh              # launcher that uses the project virtualenv
 ```
+
+## Data sources & licences
+
+The offline interlinear and Strong's datasets under `data/lexicon/` are derived
+from the following open-source resources and are rebuilt with
+`scripts/prepare_lexicon.py` (sources cloned under `data/raw/`):
+
+| Component | Source | Licence |
+| --- | --- | --- |
+| NT Greek text + morphology | [MorphGNT SBLGNT](https://github.com/morphgnt/sblgnt) | SBLGNT text: [SBLGNT EULA](https://sblgnt.com/license/); morphology: CC-BY-SA 3.0 |
+| OT Hebrew text + morphology | [OpenScriptures Hebrew Bible (morphhb)](https://github.com/openscriptures/morphhb) | WLC text: Public Domain; morphology: CC-BY 4.0 |
+| Greek lemma → Strong's | [jtauber/greek-lemma-mappings](https://github.com/jtauber/greek-lemma-mappings) | CC-BY-SA 4.0 |
+| Strong's dictionaries (G/H) | [openscriptures/strongs](https://github.com/openscriptures/strongs) — Strong, *Exhaustive Concordance* (1890/1894) | Public Domain (CC-BY-SA on the JSON derivative) |
+
+Attribution:
+- MorphGNT SBLGNT — James K. Tauber and contributors
+- OpenScriptures Hebrew Bible Project
+- `greek-lemma-mappings` — James Tauber (CC-BY-SA 4.0)
+- Strong's *Exhaustive Concordance of the Bible* — James Strong (1890/1894);
+  JSON conversion by the Open Scriptures project (Michael Boler, David
+  Instone-Brewer, Ulrik Petersen)
 
 ## Why GTK3 + WebKit2 4.1?
 

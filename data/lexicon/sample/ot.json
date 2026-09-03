@@ -1,0 +1,11 @@
+{
+  "1:1:1": [
+    {"w": "בְּרֵאשִׁית", "lemma": "רֵאשִׁית", "translit": "bereshit", "pos": "Ncfsa", "strongs": "H7225"},
+    {"w": "בָּרָא", "lemma": "בָּרָא", "translit": "bara", "pos": "V-Qal-Perf-3cs", "strongs": "H1254"},
+    {"w": "אֱלֹהִים", "lemma": "אֱלֹהִים", "translit": "elohim", "pos": "Ncmpa", "strongs": "H430"},
+    {"w": "אֵת", "lemma": "אֵת", "translit": "et", "pos": "TO", "strongs": "H853"},
+    {"w": "הַשָּׁמַיִם", "lemma": "שָׁמַיִם", "translit": "hashamayim", "pos": "Ncmpa", "strongs": "H8064"},
+    {"w": "וְאֵת", "lemma": "אֵת", "translit": "ve'et", "pos": "TO", "strongs": "H853"},
+    {"w": "הָאָרֶץ", "lemma": "אֶרֶץ", "translit": "ha'aretz", "pos": "Ncfsa", "strongs": "H776"}
+  ]
+}

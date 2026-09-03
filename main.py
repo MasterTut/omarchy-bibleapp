@@ -27,12 +27,16 @@ from reader_config import (
     list_translations, _display_name,
 )
 from reader_assets import FONT_FAMILY, STYLESHEET, PAGE_JS, JS_HANDLER
+from ui_toc import TocMixin
+from ui_search import SearchMixin
+from ui_settings import SettingsMixin
+from ui_resources import ResourcesMixin
 from document import Document
 import personalspace
 import verse_ref
+import lexicon
 
-
-class OmarchyReader(Gtk.Application):
+class OmarchyReader(Gtk.Application, TocMixin, SearchMixin, SettingsMixin, ResourcesMixin):
     def __init__(self):
         super().__init__(application_id=APP_ID)
         self.book_path = None
@@ -49,6 +53,11 @@ class OmarchyReader(Gtk.Application):
         self._mode_chips = None
         self._mode_hint = None
         self._pending_verse = 0
+        self._word_mode = False
+        self._selected_word = ""
+        self._word_verse = 0
+        self._word_index = 0
+        self._word_count = 0
         self._refs_panel_height = 240
         self._search_panel_height = 300
         self._refs_tab = "notes"
@@ -296,279 +305,6 @@ class OmarchyReader(Gtk.Application):
 
         self._update_header_focus()
 
-    def _build_toc_overlay(self):
-        """Build the chapter-list overlay ("Table of Contents")."""
-        self.toc_overlay = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
-        self.toc_overlay.set_visible(False)
-        self.toc_overlay.set_halign(Gtk.Align.FILL)
-        self.toc_overlay.set_valign(Gtk.Align.FILL)
-        self.toc_overlay.get_style_context().add_class("toc-overlay")
-
-        bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-        bar.set_margin_start(16)
-        bar.set_margin_end(16)
-        bar.set_margin_top(12)
-        bar.set_margin_bottom(8)
-
-        back_btn = Gtk.Button(label="Back")
-        back_btn.get_style_context().add_class("toc-back")
-        back_btn.connect("clicked", self._on_toc_back)
-        self.toc_back_btn = back_btn
-        bar.pack_start(back_btn, False, False, 0)
-
-        label = Gtk.Label(label="Books")
-        label.get_style_context().add_class("title-label")
-        label.set_halign(Gtk.Align.START)
-        self.toc_title_label = label
-        bar.pack_start(label, True, True, 0)
-
-        count = Gtk.Label(label="")
-        count.get_style_context().add_class("progress-label")
-        self.toc_count = count
-        bar.pack_end(count, False, False, 0)
-
-        row = Gtk.ListBox()
-        row.set_selection_mode(Gtk.SelectionMode.SINGLE)
-        self.toc_list = row
-        self.toc_list.set_vexpand(True)
-        self.toc_list.set_margin_start(16)
-        self.toc_list.set_margin_end(16)
-        self.toc_list.set_margin_bottom(16)
-        self.toc_list.connect("row-activated", self._on_toc_row_activated)
-
-        self.toc_box = self.toc_list
-
-        scroller = Gtk.ScrolledWindow()
-        scroller.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
-        scroller.set_vexpand(True)
-        scroller.add(self.toc_list)
-        self._toc_scroller = scroller
-
-        self.toc_overlay.pack_start(bar, False, False, 0)
-        self.toc_overlay.pack_start(scroller, True, True, 0)
-
-    def _refresh_toc(self):
-        """(Re)populate the TOC list based on the current mode."""
-        for r in self.toc_list.get_children():
-            self.toc_list.remove(r)
-        self._toc_row_index = {}
-        self._toc_rows = []
-
-        if not self._toc_books:
-            empty = Gtk.Label(label="No table of contents available.")
-            empty.get_style_context().add_class("progress-label")
-            self.toc_list.add(empty)
-            self.toc_title_label.set_text("Contents")
-            self.toc_count.set_text("")
-            self.toc_back_btn.set_visible(False)
-            return
-
-        items = []
-        title = "Books"
-        if self._toc_mode == "books":
-            title = "Books"
-            items = [
-                (b["title"], {"type": "book", "index": i})
-                for i, b in enumerate(self._toc_books)
-            ]
-        elif self._toc_mode == "chapters":
-            book = self._toc_books[self._toc_book_idx]
-            title = book["title"]
-            items = [
-                (
-                    c["title"],
-                    {
-                        "type": "chapter",
-                        "index": c["index"],
-                        "book_idx": self._toc_book_idx,
-                        "chapter_in_book_idx": ci,
-                    },
-                )
-                for ci, c in enumerate(book["chapters"])
-            ]
-        elif self._toc_mode == "verses":
-            book = self._toc_books[self._toc_book_idx]
-            chapter = book["chapters"][self._toc_chapter_idx]
-            title = f"{book['title']} · {chapter['title']}"
-            verse_list = self.source.verses(chapter["index"]) if self.source else []
-            items = [
-                (
-                    f"Verse {vn}",
-                    {
-                        "type": "verse",
-                        "verse": vn,
-                        "chapter_index": chapter["index"],
-                    },
-                )
-                for vn in verse_list
-            ]
-
-        self.toc_title_label.set_text(title)
-        self.toc_back_btn.set_visible(self._toc_mode != "books")
-        self.toc_count.set_text(
-            f"{len(items)} item{'s' if len(items) != 1 else ''}"
-        )
-
-        for i, (label, data) in enumerate(items):
-            row = Gtk.ListBoxRow()
-            self._toc_row_index[row] = i
-            self._toc_rows.append(row)
-            row._toc_data = data
-            txt = Gtk.Label(label=label)
-            txt.set_xalign(0.0)
-            txt.set_line_wrap(True)
-            txt.set_halign(Gtk.Align.START)
-            txt.get_style_context().add_class("toc-title")
-            if self._toc_mode == "chapters" and data.get("index") == self.chapter_index:
-                txt.get_style_context().add_class("toc-current")
-            row.add(txt)
-            self.toc_list.add(row)
-
-        self.toc_list.show_all()
-
-    def _toggle_toc(self):
-        if self.toc_overlay.get_visible():
-            self._hide_toc()
-        else:
-            self._show_toc()
-
-    def _toc_locate_current_chapter(self):
-        """Return (book_idx, chapter_in_book_idx) for the current chapter."""
-        return self.doc.locate() if self.doc else (0, 0)
-
-    def _show_toc(self):
-        if not self.chapters or not self._toc_books:
-            return
-        self._hide_notes()
-        self._hide_settings()
-        self._hide_help()
-        self._toc_mode = "books"
-        self._toc_book_idx, self._toc_chapter_idx = self._toc_locate_current_chapter()
-        self._toc_verse_idx = 0
-        self._refresh_toc()
-        self.toc_overlay.show_all()
-        self.toc_overlay.set_visible(True)
-        # Highlight the book containing the current chapter.
-        if self._toc_rows and 0 <= self._toc_book_idx < len(self._toc_rows):
-            row = self._toc_rows[self._toc_book_idx]
-            self.toc_list.select_row(row)
-            self.toc_list.grab_focus()
-            self._scroll_to_toc_row(row)
-
-    def _hide_toc(self):
-        self.toc_overlay.set_visible(False)
-        if self._focus not in ("notes", "refs"):
-            self._focus = "content"
-        if self.webview and not self._on_home:
-            self.webview.grab_focus()
-        self._update_header_focus()
-
-    def _toc_selected_index(self):
-        row = self.toc_list.get_selected_row()
-        if row is not None:
-            return self._toc_row_index.get(row)
-        if self._toc_rows:
-            return 0
-        return None
-
-    def _toc_move(self, offset):
-        current = self._toc_selected_index()
-        if current is None or not self._toc_rows:
-            return
-        target = current + offset
-        if target < 0 or target >= len(self._toc_rows):
-            return
-        row = self._toc_rows[target]
-        self.toc_list.select_row(row)
-        self._scroll_to_toc_row(row)
-
-    def _scroll_to_toc_row(self, row):
-        """Scroll the TOC list so the selected row is fully visible.
-
-        scroll_to_row can under-scroll at the very bottom (the last row can end
-        up below the fold), so we scroll minimally via the ScrolledWindow
-        adjustment instead, once the row has been allocated.
-        """
-        def ensure():
-            if row is None or self._toc_scroller is None:
-                return False
-            adj = self._toc_scroller.get_vadjustment()
-            if adj is None:
-                self.toc_list.scroll_to_row(row)
-                return False
-            # Translate the row's allocation into the scrolled window's coords.
-            alloc = row.get_allocation()
-            list_alloc = self.toc_list.get_allocation()
-            top = alloc.y - (list_alloc.y - 0)
-            bottom = top + alloc.height
-            vis_top = adj.get_value()
-            vis_bottom = vis_top + adj.get_page_size()
-            if top < vis_top:
-                adj.set_value(max(adj.get_lower(), top))
-            elif bottom > vis_bottom:
-                adj.set_value(min(adj.get_upper() - adj.get_page_size(),
-                                  bottom - adj.get_page_size()))
-            return False
-
-        # Defer one frame so the newly selected row has an allocation.
-        GLib.idle_add(ensure)
-
-    def _toc_activate_current(self):
-        if not self.toc_overlay.get_visible():
-            return
-        row = self.toc_list.get_selected_row()
-        if row is not None:
-            self._on_toc_row_activated(self.toc_list, row)
-
-    def _on_toc_row_activated(self, listbox, row):
-        data = getattr(row, "_toc_data", None)
-        if not data:
-            return
-        dtype = data.get("type")
-        if dtype == "book":
-            self._toc_mode = "chapters"
-            self._toc_book_idx = data.get("index", 0)
-            self._toc_chapter_idx = 0
-            self._refresh_toc()
-            if self._toc_rows:
-                self.toc_list.select_row(self._toc_rows[0])
-                self.toc_list.grab_focus()
-            return
-        if dtype == "chapter":
-            chapter_index = data.get("index", 0)
-            self._toc_chapter_idx = data.get("chapter_in_book_idx", 0)
-            self._do_load_chapter(chapter_index)
-            self._toc_mode = "verses"
-            self._refresh_toc()
-            if self._toc_rows:
-                self.toc_list.select_row(self._toc_rows[0])
-                self.toc_list.grab_focus()
-            return
-        if dtype == "verse":
-            vn = data.get("verse", 0)
-            self._run_js(f"goToVerse({vn});")
-            self._hide_toc()
-            return
-
-    def _on_toc_back(self, *args):
-        if not self.toc_overlay.get_visible():
-            return
-        if self._toc_mode == "verses":
-            self._toc_mode = "chapters"
-            self._refresh_toc()
-            if self._toc_rows and 0 <= self._toc_chapter_idx < len(self._toc_rows):
-                self.toc_list.select_row(self._toc_rows[self._toc_chapter_idx])
-                self.toc_list.grab_focus()
-            return
-        if self._toc_mode == "chapters":
-            self._toc_mode = "books"
-            self._refresh_toc()
-            if self._toc_rows and 0 <= self._toc_book_idx < len(self._toc_rows):
-                self.toc_list.select_row(self._toc_rows[self._toc_book_idx])
-                self.toc_list.grab_focus()
-            return
-        self._hide_toc()
-
     # ---------------- Bottom dock + mode line ----------------
     def _build_dock(self):
         # One overlay child; GTK stacks its panels top-to-bottom and the mode
@@ -589,8 +325,8 @@ class OmarchyReader(Gtk.Application):
         self._mode_chips = {}
         for key, label in (
             ("content", " CONTENT "),
-            ("notes", " PERSONAL SPACE "),
             ("refs", " RESOURCES "),
+            ("notes", " PERSONAL SPACE "),
         ):
             lbl = Gtk.Label(label=label)
             lbl.get_style_context().add_class("modeline-chip")
@@ -651,7 +387,10 @@ class OmarchyReader(Gtk.Application):
         # Accent frame on the focused dock panel (none when focus is content).
         self._set_section_frame(self._notes_overlay, self._focus == "notes")
         self._set_section_frame(self._refs_overlay, self._focus == "refs")
-        self._set_section_frame(self._search_overlay, False)
+        self._set_section_frame(
+            self._search_overlay,
+            self._search_overlay is not None and self._search_overlay.get_visible(),
+        )
         if hasattr(self, "_mode_hint"):
             self._mode_hint.set_text(self._context_hint())
         if hasattr(self, "_mode_status"):
@@ -668,6 +407,9 @@ class OmarchyReader(Gtk.Application):
         pages = getattr(self, "_page_pages", 0) or self.page_count
         if pages:
             text += f"   {self.current_page + 1}/{pages}"
+        if self._word_mode:
+            word = self._selected_word or "—"
+            text = f"word: {word}" + ("   " + title if title else "")
         return text
 
     # ---------------- Notes ----------------
@@ -706,9 +448,12 @@ class OmarchyReader(Gtk.Application):
         tabbar.set_margin_end(16)
         tabbar.set_margin_bottom(8)
         self._ps_tabs = {}
-        for key, label in (("notes", "1 Notes"), ("prayer", "2 Prayer"), ("memory", "3 Memory")):
-            b = Gtk.Button(label=label)
+        self._ps_tab_names = {}
+        for key, name in (("notes", "Notes"), ("prayer", "Prayer"), ("memory", "Memory")):
+            self._ps_tab_names[key] = name
+            b = Gtk.Button(label=self._tab_label(name, False))
             b.set_relief(Gtk.ReliefStyle.NONE)
+            b.get_style_context().add_class("tab-btn")
             b.connect("clicked", lambda _w, k=key: self._set_ps_tab(k))
             tabbar.pack_start(b, False, False, 0)
             self._ps_tabs[key] = b
@@ -735,13 +480,15 @@ class OmarchyReader(Gtk.Application):
         self.notes_buffer = self.notes_textview.get_buffer()
         note_page.pack_start(self.notes_textview, True, True, 0)
         nrow = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-        add = Gtk.Button(label="Add")
+        add = Gtk.Button(label="[ ADD ]")
+        add.get_style_context().add_class("tab-btn")
         add.connect("clicked", self._on_note_add)
         nrow.pack_start(add, False, False, 0)
-        ndel = Gtk.Button(label="Delete")
+        ndel = Gtk.Button(label="[ DELETE ]")
+        ndel.get_style_context().add_class("tab-btn")
         ndel.connect("clicked", lambda *_: self._delete_current_note())
         nrow.pack_start(ndel, False, False, 0)
-        nhint = Gtk.Label(label="Ctrl+Enter add \u00b7 Ctrl+J to content \u00b7 1-3 tabs")
+        nhint = Gtk.Label(label="i edit \u00b7 Tab cycles \u00b7 Ctrl+Enter add \u00b7 Ctrl+J content")
         nhint.get_style_context().add_class("progress-label")
         nrow.pack_start(nhint, True, True, 0)
         note_page.pack_start(nrow, False, False, 0)
@@ -768,7 +515,8 @@ class OmarchyReader(Gtk.Application):
             self.prayer_freq.append_text(f.capitalize())
         self.prayer_freq.set_active(0)
         prow.pack_start(self.prayer_freq, False, False, 0)
-        padd = Gtk.Button(label="Add")
+        padd = Gtk.Button(label="[ ADD ]")
+        padd.get_style_context().add_class("tab-btn")
         padd.connect("clicked", lambda *_: self._prayer_add())
         prow.pack_start(padd, False, False, 0)
         prayer_page.pack_start(prow, False, False, 0)
@@ -786,11 +534,13 @@ class OmarchyReader(Gtk.Application):
         mscroller.add(self.memory_list)
         memory_page.pack_start(mscroller, True, True, 0)
         mrow = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-        madd = Gtk.Button(label="Add current verse")
+        madd = Gtk.Button(label="[ ADD VERSE ]")
+        madd.get_style_context().add_class("tab-btn")
         madd.connect("clicked", lambda *_: self._memory_add_current())
         mrow.pack_start(madd, False, False, 0)
-        self.memory_hide_btn = Gtk.ToggleButton(label="Hide text")
-        self.memory_hide_btn.connect("toggled", lambda *_: self._refresh_memory())
+        self.memory_hide_btn = Gtk.ToggleButton(label="[ HIDE TEXT ]")
+        self.memory_hide_btn.get_style_context().add_class("tab-btn")
+        self.memory_hide_btn.connect("toggled", self._on_memory_hide_toggled)
         mrow.pack_start(self.memory_hide_btn, False, False, 0)
         mhint = Gtk.Label(label="Follows you across books \u00b7 Space toggles")
         mhint.get_style_context().add_class("progress-label")
@@ -801,115 +551,6 @@ class OmarchyReader(Gtk.Application):
         self._notes_overlay.pack_start(stack, True, True, 0)
         self._ps_tab = "notes"
         self._apply_note_height(SETTINGS.get("note_panel_height", 300))
-
-    def _build_refs_overlay(self):
-        """Build the tabbed Resources panel (a strip above the notes)."""
-        # EventBox gives the panel a real GdkWindow so a click anywhere in it
-        # focuses it (its label children are windowless and would not).
-        self._refs_overlay = Gtk.EventBox()
-        self._refs_overlay.set_visible(False)
-        self._refs_overlay.set_halign(Gtk.Align.FILL)
-        self._refs_overlay.set_valign(Gtk.Align.END)
-        self._refs_overlay.set_size_request(-1, self._refs_panel_height)
-        self._refs_overlay.get_style_context().add_class("refs-overlay")
-        self._refs_overlay.connect(
-            "button-press-event", lambda *_: self._focus_refs()
-        )
-        self._refs_inner = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
-        self._refs_overlay.add(self._refs_inner)
-        outer = self._refs_inner
-
-        bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-        bar.set_margin_start(16)
-        bar.set_margin_end(16)
-        bar.set_margin_top(10)
-        bar.set_margin_bottom(6)
-
-        title = Gtk.Label(label="Resources")
-        title.get_style_context().add_class("title-label")
-        title.set_halign(Gtk.Align.START)
-        bar.pack_start(title, False, False, 0)
-
-        self.refs_loc = Gtk.Label(label="")
-        self.refs_loc.get_style_context().add_class("progress-label")
-        bar.pack_end(self.refs_loc, False, False, 0)
-
-        close = Gtk.Button(label="\u2715")
-        close.connect("clicked", lambda *_: self._hide_refs())
-        bar.pack_end(close, False, False, 0)
-
-        outer.pack_start(bar, False, False, 0)
-
-        # Tab bar: Notes · Cross-refs · Introduction · Images · Links.
-        tabs = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
-        tabs.set_margin_start(16)
-        tabs.set_margin_end(16)
-        tabs.set_margin_bottom(8)
-        self._ref_tab_buttons = {}
-        for key, label in (
-            ("notes", "1 Study Notes"),
-            ("crossrefs", "2 Cross-refs"),
-            ("intro", "3 Intro"),
-            ("images", "4 Images"),
-            ("links", "5 Links"),
-        ):
-            btn = Gtk.Button(label=label)
-            btn.set_relief(Gtk.ReliefStyle.NONE)
-            btn.connect("clicked", lambda _b, k=key: self._set_ref_tab(k))
-            tabs.pack_start(btn, False, False, 0)
-            self._ref_tab_buttons[key] = btn
-        outer.pack_start(tabs, False, False, 0)
-
-        self._refs_body = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
-        self._refs_body.set_margin_start(16)
-        self._refs_body.set_margin_end(16)
-        self._refs_body.set_margin_bottom(12)
-        self._refs_scroller = scroller = Gtk.ScrolledWindow()
-        scroller.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
-        scroller.set_vexpand(True)
-        scroller.set_can_focus(True)
-        scroller.connect("button-press-event", lambda *_: self._focus_refs())
-        scroller.add(self._refs_body)
-        scroller.get_style_context().add_class("refs-scroller")
-
-        outer.pack_start(scroller, True, True, 0)
-
-    def _set_ref_tab(self, key):
-        if key not in self._ref_tab_buttons:
-            return
-        if key != "notes":
-            self._refs_pinned = None
-        self._refs_tab = key
-        self._refresh_refs()
-        self._focus_refs()
-
-    def _next_ref_tab(self, delta):
-        order = list(self._ref_tab_buttons.keys())
-        if self._refs_tab not in order:
-            return order[0]
-        idx = (order.index(self._refs_tab) + delta) % len(order)
-        return order[idx]
-
-    def _sync_ref_tab_buttons(self):
-        for key, btn in self._ref_tab_buttons.items():
-            ctx = btn.get_style_context()
-            if key == self._refs_tab:
-                ctx.add_class("tab-active")
-            else:
-                ctx.remove_class("tab-active")
-
-    def _focus_in_refs(self):
-        """True when keyboard focus is inside the Resources panel."""
-        if self._refs_overlay is None:
-            return False
-        widget = self.window.get_focus()
-        while widget is not None:
-            if widget is self._refs_overlay:
-                return True
-            if widget is self._notes_overlay or widget is self.toc_overlay:
-                return False
-            widget = widget.get_parent()
-        return False
 
     def _focus_refs(self):
         self._active_section = "refs"
@@ -942,14 +583,14 @@ class OmarchyReader(Gtk.Application):
         """Move focus among the content and any *currently open* panels.
 
         Never auto-opens a panel: if only the reading content is present this is
-        a no-op. Ctrl+j / Ctrl+k therefore just walk content -> notes -> resources
-        (skipping whichever are closed) and back.
+        a no-op. Ctrl+j walks content -> resources -> personal space (skipping
+        whichever are closed) and wraps; Ctrl+k reverses.
         """
         order = ["content"]
-        if self._notes_overlay.get_visible():
-            order.append("notes")
         if self._refs_overlay is not None and self._refs_overlay.get_visible():
             order.append("refs")
+        if self._notes_overlay.get_visible():
+            order.append("notes")
         if len(order) <= 1:
             self._update_header_focus()
             return
@@ -994,41 +635,6 @@ class OmarchyReader(Gtk.Application):
             self._focus = "content"
             self._update_header_focus()
 
-    def _scroll_refs(self, delta, big=False):
-        if self._refs_scroller is None:
-            return
-        adj = self._refs_scroller.get_vadjustment()
-        step = adj.get_page_increment() if big else adj.get_step_increment()
-        if step <= 0:
-            step = 240 if big else 30
-        new = adj.get_value() + delta * step
-        new = max(adj.get_lower(), min(new, adj.get_upper() - adj.get_page_size()))
-        adj.set_value(new)
-
-    def _show_refs(self):
-        if not self.book_path or not self.chapters:
-            return
-        self._refs_overlay.set_visible(True)
-        self._position_refs_above_notes()
-        self._refresh_refs()
-        self._focus_refs()
-
-    def _hide_refs(self):
-        if self._refs_overlay is not None:
-            self._refs_overlay.set_visible(False)
-        if self._focus == "refs":
-            self._focus = "content"
-            self._active_section = "content"
-        if self.webview and not self._on_home:
-            self.webview.grab_focus()
-        self._update_header_focus()
-
-    def _toggle_refs(self):
-        if self._refs_overlay is not None and self._refs_overlay.get_visible():
-            self._hide_refs()
-        else:
-            self._show_refs()
-
     def _position_bottom_panels(self):
         """Layout is now handled by the dock box; just refresh the focus chrome."""
         self._update_mode_line()
@@ -1041,109 +647,6 @@ class OmarchyReader(Gtk.Application):
     def _position_refs_above_notes(self):
         # Back-compatible alias; kept so existing call sites still work.
         self._update_mode_line()
-
-    def _ref_placeholder(self, text):
-        lbl = Gtk.Label(label=text)
-        lbl.get_style_context().add_class("progress-label")
-        lbl.set_halign(Gtk.Align.START)
-        lbl.set_xalign(0.0)
-        lbl.set_line_wrap(True)
-        self._refs_body.pack_start(lbl, False, False, 0)
-
-    def _ref_card(self, label, text):
-        card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
-        card.get_style_context().add_class("ref-card")
-        if label:
-            head = Gtk.Label(label=f"[{label}]")
-            head.get_style_context().add_class("toc-current")
-            head.set_halign(Gtk.Align.START)
-            card.pack_start(head, False, False, 0)
-        body = Gtk.Label(label=text)
-        body.set_halign(Gtk.Align.START)
-        body.set_xalign(0.0)
-        body.set_line_wrap(True)
-        body.set_selectable(True)
-        card.pack_start(body, False, False, 0)
-        self._refs_body.pack_start(card, False, False, 0)
-
-    def _open_uri(self, uri):
-        """Open a file:// or http(s) URI with the system default handler."""
-        try:
-            if hasattr(Gtk, "show_uri_on_window"):
-                Gtk.show_uri_on_window(self.window, uri, Gdk.CURRENT_TIME)
-            else:
-                Gio.AppInfo.launch_default_for_uri(uri, None)
-        except Exception:
-            GLib.spawn_command_line_async(f"xdg-open {shlex.quote(uri)}")
-
-    def _refresh_refs(self):
-        """Re-render the Resources panel for the current tab + verse."""
-        if self._refs_overlay is None or not self._refs_overlay.get_visible():
-            return
-        for child in self._refs_body.get_children():
-            self._refs_body.remove(child)
-
-        tab = self._refs_tab
-        verse = getattr(self, "_current_verse", 0)
-        book_name = self.chapters[self.chapter_index][0] if 0 <= self.chapter_index < len(self.chapters) else ""
-
-        if tab in ("notes", "crossrefs"):
-            self.refs_loc.set_text(f"{book_name} · v. {verse}" if verse else book_name)
-            if self._refs_pinned is not None and tab == "notes":
-                entries = [self._refs_pinned]
-            elif verse and self.source:
-                want = "crossrefs" if tab == "crossrefs" else "notes"
-                allrefs = self.source.refs(self.chapter_index)
-                entries = [e for e in allrefs.get(verse, []) if e.get("kind", "notes") == want]
-            else:
-                entries = []
-            if not entries:
-                self._ref_placeholder(
-                    "No references for this verse." if verse else "Select a verse with j/k."
-                )
-            else:
-                for e in entries:
-                    self._ref_card(e.get("label", ""), e.get("text", ""))
-        else:
-            intro, images, links = self.source.resources(self.chapter_index) if self.source else ("", [], [])
-            self.refs_loc.set_text(book_name)
-            if tab == "intro":
-                if intro.strip():
-                    self._ref_card("", intro)
-                else:
-                    self._ref_placeholder("No introduction for this book.")
-            elif tab == "images":
-                if not images:
-                    self._ref_placeholder("No images for this book.")
-                for im in images:
-                    cap = Gtk.Label(label=im.get("caption") or os.path.basename(im["path"]))
-                    cap.set_halign(Gtk.Align.START)
-                    cap.set_xalign(0.0)
-                    cap.set_line_wrap(True)
-                    self._refs_body.pack_start(cap, False, False, 0)
-                    btn = Gtk.Button()
-                    try:
-                        pix = GdkPixbuf.Pixbuf.new_from_file_at_scale(im["path"], 520, 400, True)
-                        btn.add(Gtk.Image.new_from_pixbuf(pix))
-                    except Exception:
-                        btn.add(Gtk.Label(label="(image unavailable)"))
-                    btn.connect(
-                        "clicked",
-                        lambda _b, p=im["path"]: self._open_uri("file://" + p),
-                    )
-                    self._refs_body.pack_start(btn, False, False, 0)
-            elif tab == "links":
-                if not links:
-                    self._ref_placeholder("No external links for this book.")
-                for lk in links:
-                    btn = Gtk.LinkButton(uri=lk["url"], label=lk["text"] or lk["url"])
-                    btn.set_halign(Gtk.Align.START)
-                    self._refs_body.pack_start(btn, False, False, 0)
-
-        self._refs_overlay.show_all()
-        self._refs_overlay.set_visible(True)
-        self._position_refs_above_notes()
-        self._sync_ref_tab_buttons()
 
     def _apply_note_height(self, height):
         """Set the height of the notes panel and persist it to settings."""
@@ -1159,19 +662,6 @@ class OmarchyReader(Gtk.Application):
 
     def _shrink_note_height(self, amount=40):
         self._apply_note_height(max(160, self._note_panel_height - amount))
-
-    def _apply_refs_height(self, height):
-        """Set the height of the references panel."""
-        self._refs_panel_height = int(height)
-        if self._refs_overlay is not None:
-            self._refs_overlay.set_size_request(-1, self._refs_panel_height)
-        self._position_refs_above_notes()
-
-    def _grow_refs_height(self, amount=40):
-        self._apply_refs_height(self._refs_panel_height + amount)
-
-    def _shrink_refs_height(self, amount=40):
-        self._apply_refs_height(max(140, self._refs_panel_height - amount))
 
     def _notes_lose_focus_appearance(self):
         """Make the Personal Space panel look unfocused without hiding it."""
@@ -1260,6 +750,34 @@ class OmarchyReader(Gtk.Application):
         delta = 1 if direction == "down" else -1
         self._run_js(f"moveVerse({delta});")
 
+    def _toggle_word_mode(self):
+        self._word_mode = not self._word_mode
+        if self._word_mode:
+            self._word_index = 0
+            self._run_js("setWordMode(true); selectWordIndex(0);")
+            # Surface the interlinear for the current verse.
+            if self.doc and lexicon.interlinear(*self._inspect_ref()):
+                self._show_refs()
+                self._set_ref_tab("word")
+        else:
+            self._selected_word = ""
+            self._word_index = self._word_count = 0
+            self._run_js("setWordMode(false);")
+        self._update_header_focus()
+
+    def _word_step(self, delta):
+        if not self._word_mode:
+            return
+        self._run_js("selectWordIndex(%d);" % (self._word_index + delta))
+
+    def _on_wordpos(self, data):
+        self._word_index = int(data.get("index") or 0)
+        self._word_count = int(data.get("count") or 0)
+        self._selected_word = (data.get("text") or "").strip()
+        self._word_verse = int(data.get("verse") or 0)
+        self._refresh_refs()
+        self._update_mode_line()
+
     def _panel_focus_state(self):
         focused = self._focus_in_text_input()
         ov = self._notes_overlay.get_style_context()
@@ -1343,11 +861,13 @@ class OmarchyReader(Gtk.Application):
         self._ps_tab = key
         self._ps_stack.set_visible_child_name(key)
         for k, b in self._ps_tabs.items():
+            active = k == key
             ctx = b.get_style_context()
-            if k == key:
+            if active:
                 ctx.add_class("tab-active")
             else:
                 ctx.remove_class("tab-active")
+            b.set_label(self._tab_label(self._ps_tab_names.get(k, k), active))
         if key == "notes":
             self._load_verse_note()
         elif key == "prayer":
@@ -1511,8 +1031,9 @@ class OmarchyReader(Gtk.Application):
             if not pending:
                 label.get_style_context().add_class("progress-label")
             row.pack_start(label, True, True, 0)
-            rm = Gtk.Button(label="Delete")
+            rm = Gtk.Button(label="[ DEL ]")
             rm.set_relief(Gtk.ReliefStyle.NONE)
+            rm.get_style_context().add_class("tab-btn")
             rm.connect("clicked", lambda _w, pid=p["id"]: self._prayer_remove(pid))
             row.pack_start(rm, False, False, 0)
             self.prayer_list.pack_start(row, False, False, 0)
@@ -1535,6 +1056,10 @@ class OmarchyReader(Gtk.Application):
             self.memory, book, self.chapter_index + 1, verse or 1, text or ""
         )
         save_memory(self.memory)
+        self._refresh_memory()
+
+    def _on_memory_hide_toggled(self, btn):
+        btn.set_label("[\u25b8 HIDE TEXT ]" if btn.get_active() else "[ HIDE TEXT ]")
         self._refresh_memory()
 
     def _memory_toggle(self, key):
@@ -1565,8 +1090,9 @@ class OmarchyReader(Gtk.Application):
             chk.set_active(m.get("done", False))
             chk.connect("toggled", lambda _w, k=m["key"]: self._memory_toggle(k))
             hrow.pack_start(chk, True, True, 0)
-            rm = Gtk.Button(label="Delete")
+            rm = Gtk.Button(label="[ DEL ]")
             rm.set_relief(Gtk.ReliefStyle.NONE)
+            rm.get_style_context().add_class("tab-btn")
             rm.connect("clicked", lambda _w, k=m["key"]: self._memory_remove(k))
             hrow.pack_start(rm, False, False, 0)
             box.pack_start(hrow, False, False, 0)
@@ -1577,336 +1103,6 @@ class OmarchyReader(Gtk.Application):
             box.pack_start(txt, False, False, 0)
             self.memory_list.pack_start(box, False, False, 0)
         self.memory_list.show_all()
-    # ---------------- Settings ----------------
-    def _build_settings_overlay(self):
-        """Build the settings panel (opened with Ctrl+S)."""
-        self._settings_overlay = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
-        self._settings_overlay.set_visible(False)
-        self._settings_overlay.set_halign(Gtk.Align.CENTER)
-        self._settings_overlay.set_valign(Gtk.Align.CENTER)
-        self._settings_overlay.get_style_context().add_class("settings-overlay")
-        self._settings_overlay.set_size_request(420, -1)
-
-        bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-        bar.set_margin_start(16)
-        bar.set_margin_end(16)
-        bar.set_margin_top(14)
-        bar.set_margin_bottom(8)
-
-        title = Gtk.Label(label="Settings")
-        title.get_style_context().add_class("title-label")
-        title.set_halign(Gtk.Align.START)
-        bar.pack_start(title, True, True, 0)
-
-        close = Gtk.Button(label="\u2715")
-        close.connect("clicked", lambda *_: self._hide_settings())
-        bar.pack_end(close, False, False, 0)
-
-        row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
-        row.set_margin_start(16)
-        row.set_margin_end(16)
-        row.set_margin_top(8)
-        row.set_margin_bottom(16)
-
-        label_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
-        lbl = Gtk.Label(label="Auto-hide top bar")
-        lbl.set_xalign(0.0)
-        lbl.set_halign(Gtk.Align.START)
-        label_box.pack_start(lbl, False, False, 0)
-
-        sub = Gtk.Label(label="Start with the header hidden; Ctrl+Shift+H shows it.")
-        sub.get_style_context().add_class("progress-label")
-        sub.set_xalign(0.0)
-        sub.set_halign(Gtk.Align.START)
-        label_box.pack_start(sub, False, False, 0)
-
-        switch = Gtk.Switch()
-        switch.set_active(SETTINGS.get("auto_hide_header", True))
-        switch.set_halign(Gtk.Align.END)
-        switch.set_valign(Gtk.Align.CENTER)
-        switch.connect("state-set", self._on_auto_hide_toggled)
-        self._auto_hide_switch = switch
-
-        row.pack_start(label_box, True, True, 0)
-        row.pack_start(switch, False, False, 0)
-
-        self._settings_overlay.pack_start(bar, False, False, 0)
-        self._settings_overlay.pack_start(row, False, False, 0)
-
-        row3 = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
-        row3.set_margin_start(16)
-        row3.set_margin_end(16)
-        row3.set_margin_top(8)
-        row3.set_margin_bottom(8)
-
-        label_box3 = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
-        lbl3 = Gtk.Label(label="Show Personal Space")
-        lbl3.set_xalign(0.0)
-        lbl3.set_halign(Gtk.Align.START)
-        label_box3.pack_start(lbl3, False, False, 0)
-        sub3 = Gtk.Label(
-            label="Notes, Prayer Requests and Memorization (Ctrl+P). "
-            "Turn off to hide the feature entirely."
-        )
-        sub3.get_style_context().add_class("progress-label")
-        sub3.set_xalign(0.0)
-        sub3.set_halign(Gtk.Align.START)
-        sub3.set_line_wrap(True)
-        label_box3.pack_start(sub3, False, False, 0)
-
-        switch3 = Gtk.Switch()
-        switch3.set_active(SETTINGS.get("show_personal_space", True))
-        switch3.set_halign(Gtk.Align.END)
-        switch3.set_valign(Gtk.Align.CENTER)
-        switch3.connect("state-set", self._on_show_personal_space_toggled)
-        self._show_ps_switch = switch3
-
-        row3.pack_start(label_box3, True, True, 0)
-        row3.pack_start(switch3, False, False, 0)
-
-        self._settings_overlay.pack_start(row3, False, False, 0)
-
-    def _on_show_personal_space_toggled(self, switch, active):
-        SETTINGS["show_personal_space"] = bool(active)
-        save_settings()
-        if not active and self._notes_overlay is not None:
-            self._hide_notes()
-        return False
-
-    def _on_auto_hide_toggled(self, switch, active):
-        SETTINGS["auto_hide_header"] = bool(active)
-        save_settings()
-        # Apply immediately: when auto-hide is on, hide the header now;
-        # when turned off, bring it back so state matches the setting.
-        self.headerbar.set_visible(not active)
-        return False
-
-    def _toggle_settings(self):
-        if self._settings_overlay.get_visible():
-            self._hide_settings()
-        else:
-            self._show_settings()
-
-    def _show_settings(self):
-        self._hide_notes()
-        self._hide_toc()
-        self._hide_help()
-        self._settings_overlay.show_all()
-        self._settings_overlay.set_visible(True)
-        self._auto_hide_switch.set_active(SETTINGS.get("auto_hide_header", True))
-
-    def _hide_settings(self):
-        self._settings_overlay.set_visible(False)
-
-    # ---------------- Keybinding reference ----------------
-    def _build_help_overlay(self):
-        """Build the keybinding reference panel (opened with Ctrl+K)."""
-        self._help_overlay = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
-        self._help_overlay.set_visible(False)
-        self._help_overlay.set_halign(Gtk.Align.CENTER)
-        self._help_overlay.set_valign(Gtk.Align.CENTER)
-        self._help_overlay.get_style_context().add_class("settings-overlay")
-        self._help_overlay.set_size_request(460, -1)
-
-        bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-        bar.set_margin_start(16)
-        bar.set_margin_end(16)
-        bar.set_margin_top(14)
-        bar.set_margin_bottom(8)
-
-        title = Gtk.Label(label="Keybindings")
-        title.get_style_context().add_class("title-label")
-        title.set_halign(Gtk.Align.START)
-        bar.pack_start(title, True, True, 0)
-
-        close = Gtk.Button(label="\u2715")
-        close.connect("clicked", lambda *_: self._hide_help())
-        bar.pack_end(close, False, False, 0)
-
-        rows = [
-            ("Ctrl + T", "Table of contents: books · chapters · verses (j/k, Enter, h/Back)"),
-            ("Ctrl + P", "Personal Space: Notes · Prayer · Memory (tabs 1-3)"),
-            ("/", "Search a book or passage (e.g. John 3:16) · Enter jumps there"),
-            ("Ctrl + R", "Resources panel: Notes · Cross-refs · Intro · Images · Links"),
-            ("1 – 3 / 1 – 5", "Switch tabs in the focused panel (Personal Space / Resources)"),
-            ("Ctrl + j / k", "Move focus: content ⇄ personal space ⇄ resources"),
-            ("j / k (resources)", "Scroll the Resources panel · h / l switch tabs"),
-            ("Ctrl + h / l", "Focus the Personal Space notes editor"),
-            ("Ctrl + Shift + H", "Toggle header bar"),
-            ("Ctrl + S", "Settings"),
-            ("Ctrl + Shift + K", "Keybindings reference"),
-            ("Ctrl + [", "Home / choose a translation"),
-            ("Ctrl + B", "Toggle reader mode"),
-            ("Ctrl + I", "Import an EPUB into the library"),
-            ("Ctrl + O", "Open a book file (in the reader)"),
-            ("H / L / ← / →", "Previous / next page (left / right)"),
-            ("J / K / ↑ / ↓", "Notes highlighted: move up / down · content: step verses (j/↓ down, k/↑ up)"),
-            ("Home: j/k, i, x", "Move selection · i imports · x removes a translation"),
-            ("x (Home)", "Delete the highlighted translation"),
-            ("Ctrl + Shift + +/-", "Grow / shrink the focused panel (Personal Space / Resources)"),
-            ("Ctrl + Right / Ctrl + Left", "Traverse chapters"),
-        ]
-        lines = "\n".join(
-            f"<span weight='bold'>{k}</span>{'&#160;' * 4}{v}" for k, v in rows
-        )
-        body = Gtk.Label()
-        body.set_markup(lines)
-        body.set_xalign(0.0)
-        body.set_halign(Gtk.Align.START)
-        body.set_line_wrap(True)
-        body.set_margin_start(24)
-        body.set_margin_end(24)
-        body.set_margin_bottom(20)
-
-        self._help_overlay.pack_start(bar, False, False, 0)
-        self._help_overlay.pack_start(body, False, False, 0)
-
-    def _toggle_help(self):
-        if self._help_overlay.get_visible():
-            self._hide_help()
-        else:
-            self._show_help()
-
-    def _show_help(self):
-        self._hide_notes()
-        self._hide_toc()
-        self._hide_settings()
-        self._help_overlay.show_all()
-        self._help_overlay.set_visible(True)
-
-    def _hide_help(self):
-        self._help_overlay.set_visible(False)
-
-    # ---------------- Search ("Go to passage") ----------------
-    def _build_search_overlay(self):
-        # A bottom bar: the input sits at the very bottom and the suggestion
-        # list grows upward above it.
-        self._search_overlay = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
-        self._search_overlay.set_visible(False)
-        self._search_overlay.set_halign(Gtk.Align.FILL)
-        self._search_overlay.set_valign(Gtk.Align.END)
-        self._search_overlay.get_style_context().add_class("search-overlay")
-        # Track the bar's real (content-hugging) height so panels above it stack.
-        self._search_overlay.connect("size-allocate", self._on_search_alloc)
-
-        self._search_list = Gtk.ListBox()
-        self._search_list.set_selection_mode(Gtk.SelectionMode.SINGLE)
-        self._search_list.connect("row-activated", self._on_search_row_activated)
-        list_scroll = Gtk.ScrolledWindow()
-        list_scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
-        # Hug the content: grow with the number of results, up to a cap, then scroll.
-        list_scroll.set_propagate_natural_height(True)
-        list_scroll.set_max_content_height(300)
-        list_scroll.add(self._search_list)
-        self._search_overlay.pack_start(list_scroll, False, False, 0)
-
-        # Input row (bottom of the bar).
-        row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-        row.set_margin_start(16)
-        row.set_margin_end(16)
-        row.set_margin_top(6)
-        row.set_margin_bottom(8)
-        prefix = Gtk.Label(label="⌕")
-        prefix.get_style_context().add_class("title-label")
-        row.pack_start(prefix, False, False, 0)
-        self._search_entry = Gtk.Entry()
-        self._search_entry.set_placeholder_text("Go to…  e.g. John 3:16, ps 23, Genesis")
-        self._search_entry.set_has_frame(False)
-        self._search_entry.connect("changed", self._on_search_changed)
-        self._search_entry.connect("key-press-event", self._on_search_key)
-        row.pack_start(self._search_entry, True, True, 0)
-        hint = Gtk.Label(label="↑/↓ select · Enter go · Esc close")
-        hint.get_style_context().add_class("progress-label")
-        row.pack_start(hint, False, False, 0)
-        self._search_overlay.pack_start(row, False, False, 0)
-
-    def _open_search(self):
-        if not self.book_path or not self.chapters:
-            return
-        self._hide_settings()
-        self._hide_help()
-        self._search_overlay.show_all()
-        self._search_overlay.set_visible(True)
-        self._position_bottom_panels()
-        self._search_entry.set_text("")
-        self._run_search("")
-        self._search_entry.grab_focus()
-        self._search_entry.select_region(0, 0)
-
-    def _close_search(self):
-        if self._search_overlay is not None:
-            self._search_overlay.set_visible(False)
-            self._position_bottom_panels()
-
-    def _run_search(self, text):
-        for r in self._search_list.get_children():
-            self._search_list.remove(r)
-        if not self.doc:
-            self._search_results = []
-            return
-        results = verse_ref.search(self.doc.books, text, limit=30)
-        self._search_results = results
-        for res in results:
-            row = Gtk.ListBoxRow()
-            lbl = Gtk.Label(label=res["label"])
-            lbl.set_xalign(0.0)
-            lbl.set_margin_start(10)
-            lbl.set_margin_top(4)
-            lbl.set_margin_bottom(4)
-            row.add(lbl)
-            row._search_data = res
-            self._search_list.add(row)
-        self._search_list.show_all()
-        first = self._search_list.get_row_at_index(0)
-        if first is not None:
-            self._search_list.select_row(first)
-
-    def _on_search_changed(self, entry):
-        self._run_search(entry.get_text())
-
-    def _on_search_key(self, widget, event):
-        kv = event.keyval
-        if kv == Gdk.KEY_Escape:
-            self._close_search()
-            self._focus_content()
-            return True
-        if kv in (Gdk.KEY_Down, Gdk.KEY_Up):
-            self._search_select_offset(1 if kv == Gdk.KEY_Down else -1)
-            return True
-        if kv in (Gdk.KEY_Return, Gdk.KEY_KP_Enter):
-            row = self._search_list.get_selected_row()
-            if row is not None:
-                self._search_goto(getattr(row, "_search_data", None))
-            return True
-        return False
-
-    def _search_select_offset(self, delta):
-        count = len(self._search_results)
-        if count == 0:
-            return
-        cur = self._search_list.get_selected_row()
-        idx = self._search_list.get_row_index(cur) if cur else 0
-        idx = max(0, min(count - 1, idx + delta))
-        row = self._search_list.get_row_at_index(idx)
-        if row is not None:
-            self._search_list.select_row(row)
-            self._search_list.scroll_to(row)
-
-    def _on_search_row_activated(self, listbox, row):
-        self._search_goto(getattr(row, "_search_data", None))
-
-    def _search_goto(self, data):
-        if not data or not self.doc:
-            return
-        idx = data.get("chapter_index")
-        verse = data.get("verse") or 0
-        if idx is None:
-            return
-        self._close_search()
-        self._pending_verse = verse
-        self._focus = "content"
-        self._do_load_chapter(idx)
-        self._focus_content()
 
     def _apply_theme_css(self):
         css = f"""
@@ -1940,7 +1136,7 @@ class OmarchyReader(Gtk.Application):
                 color: {THEME["foreground"]};
                 background: transparent;
                 border: 1px solid rgba(255,255,255,0.15);
-                border-radius: 8px;
+                border-radius: 0;
                 padding: 2px 8px;
                 font-family: {FONT_FAMILY};
             }}
@@ -1982,8 +1178,9 @@ class OmarchyReader(Gtk.Application):
                 color: {THEME["background"]};
             }}
             .dock {{
-                background-color: alpha({THEME["background"]}, 0.99);
-                border-top: 1px solid rgba(255,255,255,0.15);
+                background-color: {THEME["background"]};
+                border-top: 1px solid rgba(255,255,255,0.12);
+                padding: 3px;
             }}
             .modeline {{
                 background-color: {THEME["background"]};
@@ -2013,15 +1210,20 @@ class OmarchyReader(Gtk.Application):
                 font-weight: bold;
                 padding: 0 12px;
             }}
+            .notes-overlay, .refs-overlay, .search-overlay {{
+                border: 1px solid rgba(255,255,255,0.16);
+                border-radius: 0;
+                margin: 3px;
+                background-color: {THEME["background"]};
+            }}
             .notes-overlay.section-active,
             .refs-overlay.section-active,
             .search-overlay.section-active {{
-                border-left: 3px solid {THEME["accent"]};
-                background-color: alpha({THEME["background"]}, 0.92);
+                border: 1px solid {THEME["accent"]};
+                background-color: alpha({THEME["accent"]}, 0.05);
             }}
             .notes-overlay {{
                 background-color: alpha({THEME["background"]}, 0.97);
-                border-top: 1px solid rgba(255,255,255,0.15);
             }}
             .notes-overlay.panel-focused {{
                 background-color: alpha({THEME["background"]}, 0.88);
@@ -2037,7 +1239,7 @@ class OmarchyReader(Gtk.Application):
             }}
             .note-card {{
                 border: 1px solid rgba(255,255,255,0.12);
-                border-radius: 8px;
+                border-radius: 0;
                 padding: 10px 12px;
                 background: alpha({THEME["accent"]}, 0.08);
             }}
@@ -2049,42 +1251,58 @@ class OmarchyReader(Gtk.Application):
                 color: {THEME["foreground"]};
             }}
             .notes-scroller {{
-                background-color: alpha({THEME["background"]}, 0.75);
-                border-radius: 8px;
-                border: 1px solid rgba(255,255,255,0.12);
+                background-color: transparent;
+                border-radius: 0;
+                border: none;
             }}
             .notes-scroller.zone-active {{
                 background-color: alpha({THEME["background"]}, 0.55);
-                border-color: alpha({THEME["accent"]}, 0.8);
+                border: none;
             }}
             .refs-overlay {{
                 background-color: alpha({THEME["background"]}, 0.97);
-                border-top: 1px solid rgba(255,255,255,0.15);
-                border-bottom: 1px solid rgba(255,255,255,0.10);
             }}
             .refs-scroller {{
-                background-color: alpha({THEME["background"]}, 0.55);
-                border-radius: 8px;
-                border: 1px solid rgba(255,255,255,0.12);
+                background-color: transparent;
+                border-radius: 0;
+                border: none;
                 padding: 4px;
             }}
             .ref-card {{
                 border-left: 3px solid alpha({THEME["accent"]}, 0.8);
                 padding: 2px 0 2px 10px;
             }}
+            .ref-card.word-active {{
+                border-left: 3px solid {THEME["accent"]};
+                background-color: alpha({THEME["accent"]}, 0.16);
+            }}
             .ref-card label {{
                 color: {THEME["foreground"]};
             }}
-            .refs-overlay button.tab-active, .notes-overlay button.tab-active {{
-                background-color: alpha({THEME["accent"]}, 0.28);
-                border-radius: 6px;
+            .tab-btn {{
+                background-color: transparent;
+                background-image: none;
+                border: none;
+                box-shadow: none;
+                border-radius: 0;
+                padding: 2px 4px;
+                margin: 0;
+                color: {THEME["muted"]};
                 font-weight: bold;
+            }}
+            .tab-btn:hover {{
+                color: {THEME["foreground"]};
+            }}
+            .tab-btn.tab-active {{
+                background-color: transparent;
+                color: {THEME["accent"]};
             }}
             textview {{
                 color: {THEME["foreground"]};
-                background-color: rgba(255,255,255,0.05);
-                border-radius: 8px;
-                border: 1px solid rgba(255,255,255,0.12);
+                background-color: transparent;
+                border-radius: 0;
+                border: none;
+                border-bottom: 1px solid alpha({THEME["foreground"]}, 0.35);
                 padding: 4px 6px;
             }}
             textview text {{
@@ -2098,12 +1316,12 @@ class OmarchyReader(Gtk.Application):
             }}
             .search-overlay {{
                 background-color: alpha({THEME["background"]}, 0.98);
-                border-top: 1px solid rgba(255,255,255,0.15);
             }}
             .search-overlay entry {{
                 font-size: {self.font_size}px;
                 background: transparent;
                 border: none;
+                border-bottom: 1px solid alpha({THEME["foreground"]}, 0.35);
                 box-shadow: none;
                 padding: 4px 2px;
                 color: {THEME["foreground"]};
@@ -2111,15 +1329,19 @@ class OmarchyReader(Gtk.Application):
             .search-overlay row:selected {{
                 background-color: alpha({THEME["accent"]}, 0.35);
                 color: {THEME["foreground"]};
-                border-radius: 6px;
+                border-radius: 0;
             }}
             switch {{
                 color: {THEME["foreground"]};
             }}
             entry {{
                 color: {THEME["foreground"]};
-                background-color: rgba(255,255,255,0.05);
-                border-radius: 6px;
+                background-color: transparent;
+                background-image: none;
+                border: none;
+                border-bottom: 1px solid alpha({THEME["foreground"]}, 0.35);
+                border-radius: 0;
+                box-shadow: none;
             }}
             """
         provider = Gtk.CssProvider()
@@ -2280,11 +1502,14 @@ class OmarchyReader(Gtk.Application):
         if f == "refs":
             return "Ctrl+J content · 1-5 tabs · j/k scroll · h/l tabs"
         # content
+        if self._word_mode:
+            return "h/l cycle words · j/k change verse · i exit word mode"
         tips = []
         if self._notes_overlay.get_visible():
             tips.append("Ctrl+J ⇄ Personal Space")
         elif self._refs_overlay is not None and self._refs_overlay.get_visible():
             tips.append("Ctrl+J ⇄ Resources")
+        tips.append("i word study")
         if not self._notes_overlay.get_visible():
             tips.append("Ctrl+P notes")
         if self._refs_overlay is not None and not self._refs_overlay.get_visible():
@@ -2674,6 +1899,8 @@ document.addEventListener('click', function (e) {{
             self._is_loading = False
             self._current_verse = 0
             self._refs_pinned = None
+            self._word_mode = False
+            self._selected_word = ""
             self._update_verse_label()
             self._refresh_refs()
             pages = data.get("pages", 0)
@@ -2727,6 +1954,10 @@ document.addEventListener('click', function (e) {{
             self._refs_pinned = None
             self._update_verse_label()
             self._refresh_refs()
+            if self._word_mode:
+                # Moved to a new verse -> start its word cycle at word 0.
+                self._word_index = 0
+                self._run_js("selectWordIndex(0);")
             self._refresh_notes()
         elif mtype == "ref":
             label = data.get("label", "")
@@ -2739,6 +1970,8 @@ document.addEventListener('click', function (e) {{
             self._refresh_refs()
         elif mtype == "memory_capture":
             self._memory_add(int(data.get("verse") or 0), data.get("text", ""))
+        elif mtype == "wordpos":
+            self._on_wordpos(data)
         elif mtype == "edge":
             if data.get("dir") == "next":
                 self.next_chapter()
@@ -2931,9 +2164,9 @@ document.addEventListener('click', function (e) {{
             if not shift and kn in ("1", "2", "3") and self._notes_overlay.get_visible():
                 self._set_ps_tab({"1": "notes", "2": "prayer", "3": "memory"}[kn])
                 return True
-            if shift and kn in ("1", "2", "3", "4", "5") and self._refs_overlay.get_visible():
+            if shift and kn in ("1", "2", "3", "4", "5", "6") and self._refs_overlay.get_visible():
                 key = {"1": "notes", "2": "crossrefs", "3": "intro",
-                       "4": "images", "5": "links"}[kn]
+                       "4": "images", "5": "links", "6": "word"}[kn]
                 self._set_ref_tab(key)
                 return True
             if not shift and kn == "r":
@@ -2985,8 +2218,11 @@ document.addEventListener('click', function (e) {{
             if self._hotkey_matches(HOTKEYS.get("settings"), keyname, state):
                 self._toggle_settings()
                 return True
-            if self._hotkey_matches(HOTKEYS.get("home_bracket"), keyname, state):
-                self.show_welcome()
+            if not shift and kn == "bracketleft":
+                # Ctrl+[ exits edit mode (e.g. the notes editor) back to the
+                # Personal Space tab/navigate state.
+                if self._ps_editing:
+                    self._exit_ps_edit()
                 return True
             if self._hotkey_matches(HOTKEYS.get("toggle_reader_mode"), keyname, state):
                 self._toggle_reader_mode()
@@ -3008,6 +2244,12 @@ document.addEventListener('click', function (e) {{
                 if not self._on_home:
                     self.on_open()
                 return True
+
+        # Physical Home key returns to the library (only when not typing — a
+        # focused text field consumes Home itself to jump the cursor).
+        if not ctrl and not shift and kn == "home":
+            self.show_welcome()
+            return True
 
         # Table of contents: arrow keys + Neo-Vim J/k navigation.
         # h/left goes back a level; l/right are consumed so they don't page the
@@ -3053,13 +2295,20 @@ document.addEventListener('click', function (e) {{
         if self._focus == "notes" and self._focus_in_text_input():
             return False
 
+        # 'i' in the reading content toggles word-study mode (highlight/capture
+        # individual words instead of whole verses) — groundwork for original-
+        # language lookups.
+        if not ctrl and not shift and kn == "i" and self._focus == "content" and self.chapters:
+            self._toggle_word_mode()
+            return True
+
         # Number keys switch tabs for the focused panel: 1-5 for Resources,
         # 1-3 for Personal Space (Notes / Prayer / Memory).
-        if not ctrl and not shift and kn in ("1", "2", "3", "4", "5"):
+        if not ctrl and not shift and kn in ("1", "2", "3", "4", "5", "6"):
             if self._focus == "refs":
                 key = {
                     "1": "notes", "2": "crossrefs", "3": "intro",
-                    "4": "images", "5": "links",
+                    "4": "images", "5": "links", "6": "word",
                 }.get(kn)
                 if key:
                     self._set_ref_tab(key)
@@ -3113,8 +2362,12 @@ document.addEventListener('click', function (e) {{
             return False
 
         # Content focus: j/k/h/l/arrows are handled by the page's own JS (verse
-        # stepping + paging), so let them through. Space/Page keys page here.
+        # stepping + paging), so let them through. In word mode, h/l (and the
+        # arrow keys) walk the current verse word-by-word instead.
         if self._focus == "content":
+            if self._word_mode and kn in ("h", "l", "left", "right"):
+                self._word_step(1 if kn in ("l", "right") else -1)
+                return True
             if kn in ("j", "k", "up", "down", "h", "l", "left", "right"):
                 return False
             if kn == "page_down" or kn == "space":
@@ -3194,7 +2447,6 @@ document.addEventListener('click', function (e) {{
         else:
             self.show_welcome()
 
-
 def main():
     args = list(sys.argv)
     cli_path = None
@@ -3206,7 +2458,6 @@ def main():
     app = OmarchyReader()
     app.cli_path = cli_path
     app.run(args)
-
 
 if __name__ == "__main__":
     try:

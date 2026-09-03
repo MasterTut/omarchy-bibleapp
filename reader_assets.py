@@ -100,6 +100,12 @@ STYLESHEET = """
     border-left: 3px solid {accent};
     padding-left: 0.6em;
   }}
+  body.word-mode {{
+    cursor: crosshair;
+  }}
+  body.word-mode .page {{
+    user-select: none;
+  }}
   #container {{
     position: absolute;
     left: 0; right: 0; top: 0; bottom: 0;
@@ -469,6 +475,53 @@ document.addEventListener('click', function (e) {
   }
   post({type: 'ref', label: label, text: text});
 });
+
+// ---- Word study mode: keyboard navigation via 'i' + h/l (no mouse) ----
+var wordMode = false, wordCount = 0, wordIndex = 0;
+function setWordMode(on) {
+  wordMode = !!on;
+  if (document.body) document.body.classList.toggle('word-mode', wordMode);
+  if (!wordMode) { try { window.getSelection().removeAllRanges(); } catch (e) {} }
+}
+function verseWordRanges() {
+  var el = currentVerseEl();
+  var container = el ? (el.closest('p') || el.parentNode) : document.querySelector('.page.active');
+  if (!container) return [];
+  var isW = function (c) { return /[A-Za-z0-9\u00C0-\u024F'’-]/.test(c); };
+  var ranges = [];
+  var walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT, null, false);
+  var node;
+  while ((node = walker.nextNode())) {
+    var t = node.nodeValue || '';
+    var i = 0;
+    while (i < t.length) {
+      if (isW(t[i])) {
+        var s = i;
+        while (i < t.length && isW(t[i])) i++;
+        ranges.push({ node: node, start: s, end: i, text: t.slice(s, i) });
+      } else { i++; }
+    }
+  }
+  return ranges;
+}
+// Select and report the nth word of the current verse (clamped).
+function selectWordIndex(idx) {
+  var r = verseWordRanges();
+  if (!r.length) { post({ type: 'wordpos', index: 0, count: 0, text: '', verse: currentVerseNum() }); return 0; }
+  if (idx < 0) idx = 0;
+  if (idx >= r.length) idx = r.length - 1;
+  wordIndex = idx; wordCount = r.length;
+  try {
+    var rg = document.createRange();
+    rg.setStart(r[idx].node, r[idx].start);
+    rg.setEnd(r[idx].node, r[idx].end);
+    var s = window.getSelection(); s.removeAllRanges(); s.addRange(rg);
+    if (r[idx].node.parentElement) r[idx].node.parentElement.scrollIntoView(false);
+  } catch (e) {}
+  post({ type: 'wordpos', index: idx, count: r.length, text: r[idx].text, verse: currentVerseNum() });
+  return r.length;
+}
+function clearWordSel() { try { window.getSelection().removeAllRanges(); } catch (e) {} }
 
 function showPage(idx) {
   if (!state.ready || state.pages === 0) return 0;
