@@ -493,7 +493,8 @@ function verseWordRanges() {
   var node;
   while ((node = walker.nextNode())) {
     var p = node.parentElement;
-    if (p && (p.tagName === 'SUP' || (p.getAttribute && p.getAttribute('class') || '').indexOf('v') >= 0)) continue;
+    if (p && p.tagName === 'SUP') continue;
+    if (p && p.classList && p.classList.contains('v')) continue;
     if (p && p.tagName === 'A' && p.getAttribute('href') && /^#/.test(p.getAttribute('href'))) continue;
     var t = node.nodeValue || '';
     var i = 0;
@@ -504,9 +505,6 @@ function verseWordRanges() {
         ranges.push({ node: node, start: s, end: i, text: t.slice(s, i) });
       } else { i++; }
     }
-  }
-  return ranges;
-}
   }
   return ranges;
 }
