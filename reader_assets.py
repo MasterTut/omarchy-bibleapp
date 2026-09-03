@@ -483,13 +483,17 @@ function setWordMode(on) {
   if (document.body) document.body.classList.toggle('word-mode', wordMode);
   if (!wordMode) { try { window.getSelection().removeAllRanges(); } catch (e) {} }
 }
+// Number of original-language words for the current verse (the Resource-tab /
+// interlinear list). Word navigation follows this list, not every English word.
+var interCount = 0;
+function setVerseWords(n) { interCount = n || 0; }
 function verseWordRanges() {
   var el = currentVerseEl();
   var container = el ? (el.closest('p') || el.parentNode) : document.querySelector('.page.active');
   if (!container) return [];
   var isW = function (c) { return /[A-Za-z0-9\u00C0-\u024F''-]/.test(c); };
   // English function words that carry no original-language word of their own,
-  // so we skip them to keep the content highlights aligned with the interlinear.
+  // so we skip them to keep content highlights aligned with the interlinear.
   var stop = {'the':1,'and':1,'of':1,'to':1,'in':1,'a':1,'an':1,'is':1,
               'that':1,'for':1,'was':1,'with':1,'as':1,'on':1,'be':1,'by':1,
               'at':1,'from':1,'this':1,'shall':1,'his':1,'upon':1,'it':1,
@@ -516,32 +520,46 @@ function verseWordRanges() {
   }
   return ranges;
 }
-// Select and report the nth word of the current verse (clamped).
+// Select and report the nth ORIGINAL-LANGUAGE word (interlinear index). It maps
+// to the nearest meaningful English content word via order-preserving alignment,
+// so navigation follows the Resource tab rather than every English word.
 function selectWordIndex(idx) {
   var r = verseWordRanges();
-  if (!r.length) { post({ type: 'wordpos', index: 0, count: 0, text: '', verse: currentVerseNum() }); return 0; }
+  var total = interCount > 0 ? interCount : r.length;
+  if (total === 0) { post({ type: 'wordpos', index: 0, count: 0, text: '', verse: currentVerseNum() }); return 0; }
   if (idx < 0) idx = 0;
-  if (idx >= r.length) idx = r.length - 1;
-  wordIndex = idx; wordCount = r.length;
-  try {
-    var rg = document.createRange();
-    rg.setStart(r[idx].node, r[idx].start);
-    rg.setEnd(r[idx].node, r[idx].end);
-    var s = window.getSelection(); s.removeAllRanges(); s.addRange(rg);
-    var target = r[idx].node.parentElement;
-    if (target) {
-      target.scrollIntoView({block: 'nearest'});
-      var page = target.closest('.page');
-      if (page && page.scrollHeight > page.clientHeight) {
-        var tRect = target.getBoundingClientRect();
-        var pRect = page.getBoundingClientRect();
-        if (tRect.bottom > pRect.bottom) page.scrollTop += tRect.bottom - pRect.bottom + 20;
-        else if (tRect.top < pRect.top) page.scrollTop -= pRect.top - tRect.top + 20;
+  if (idx >= total) idx = total - 1;
+  wordIndex = idx; wordCount = total;
+  var e = null;
+  if (r.length > 0) {
+    // Order-preserving/proportional map: interlinear index -> English range index.
+    var ei = total <= 1 ? 0 : Math.round(idx * (r.length - 1) / (total - 1));
+    if (ei >= r.length) ei = r.length - 1;
+    e = r[ei];
+  }
+  if (e) {
+    try {
+      var rg = document.createRange();
+      rg.setStart(e.node, e.start);
+      rg.setEnd(e.node, e.end);
+      var s = window.getSelection(); s.removeAllRanges(); s.addRange(rg);
+      var target = e.node.parentElement;
+      if (target) {
+        target.scrollIntoView({block: 'nearest'});
+        var page = target.closest('.page');
+        if (page && page.scrollHeight > page.clientHeight) {
+          var tRect = target.getBoundingClientRect();
+          var pRect = page.getBoundingClientRect();
+          if (tRect.bottom > pRect.bottom) page.scrollTop += tRect.bottom - pRect.bottom + 20;
+          else if (tRect.top < pRect.top) page.scrollTop -= pRect.top - tRect.top + 20;
+        }
       }
-    }
-  } catch (e) {}
-  post({ type: 'wordpos', index: idx, count: r.length, text: r[idx].text, verse: currentVerseNum() });
-  return r.length;
+    } catch (err) {}
+  } else {
+    try { window.getSelection().removeAllRanges(); } catch (err) {}
+  }
+  post({ type: 'wordpos', index: idx, count: total, text: e ? e.text : '', verse: currentVerseNum() });
+  return total;
 }
 function clearWordSel() { try { window.getSelection().removeAllRanges(); } catch (e) {} }
 

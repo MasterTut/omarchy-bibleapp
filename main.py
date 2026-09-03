@@ -750,11 +750,18 @@ class OmarchyReader(Gtk.Application, TocMixin, SearchMixin, SettingsMixin, Resou
         delta = 1 if direction == "down" else -1
         self._run_js(f"moveVerse({delta});")
 
+    def _word_total(self):
+        """Number of interlinear words for the current verse (the Resource-tab list)."""
+        if not self.doc or not self.chapters:
+            return 0
+        bnum, cnum, verse = self._inspect_ref()
+        return len(lexicon.interlinear(bnum, cnum, verse)) if bnum else 0
+
     def _toggle_word_mode(self):
         self._word_mode = not self._word_mode
         if self._word_mode:
             self._word_index = 0
-            self._run_js("setWordMode(true); selectWordIndex(0);")
+            self._run_js("setWordMode(true); setVerseWords(%d); selectWordIndex(0);" % self._word_total())
         else:
             self._selected_word = ""
             self._word_index = self._word_count = 0
@@ -1952,9 +1959,10 @@ document.addEventListener('click', function (e) {{
             self._update_verse_label()
             self._refresh_refs()
             if self._word_mode:
-                # Moved to a new verse -> start its word cycle at word 0.
+                # Moved to a new verse -> start its word cycle at word 0,
+                # following the interlinear (resource-tab) list.
                 self._word_index = 0
-                self._run_js("selectWordIndex(0);")
+                self._run_js("selectWordIndex(0); setVerseWords(%d);" % self._word_total())
             self._refresh_notes()
         elif mtype == "ref":
             label = data.get("label", "")
