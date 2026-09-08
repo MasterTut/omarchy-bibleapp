@@ -67,6 +67,23 @@ def run():
     mem = ps.remove_memory(mem, k)
     assert len(mem) == 1 and all(mm["key"] != k for mm in mem)
 
+    # --- bookmarks: add, toggle, remove, sort ---
+    bm = []
+    bm, added = ps.add_bookmark(bm, "/x/KJV.epub", "KJV", 3, 2, "John 3 · p.3")
+    assert added and len(bm) == 1
+    assert bm[0]["key"] == ps.bookmark_key("/x/KJV.epub", 3, 2)
+    # adding the same location twice removes it (toggle)
+    bm, added = ps.add_bookmark(bm, "/x/KJV.epub", "KJV", 3, 2, "dup")
+    assert not added and bm == []
+    bm, added = ps.add_bookmark(bm, "/x/KJV.epub", "KJV", 3, 2, "A")
+    bm, added = ps.add_bookmark(bm, "/x/ASV.epub", "ASV", 0, 0, "B")
+    bm, added = ps.add_bookmark(bm, "/x/KJV.epub", "KJV", 0, 5, "C")
+    order = [b["label"] for b in ps.bookmarks_sorted(bm)]
+    assert order == ["B", "C", "A"], order
+    bm = ps.remove_bookmark(bm, "/x/KJV.epub|3|2")
+    assert all(b["key"] != "/x/KJV.epub|3|2" for b in bm)
+    assert len(bm) == 2
+
     print("ALL PERSONAL SPACE TESTS PASSED")
     return 0
 

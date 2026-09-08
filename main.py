@@ -5,6 +5,7 @@ import html
 import os
 import re
 import sys
+import time
 import shlex
 import threading
 import zipfile
@@ -24,6 +25,7 @@ from reader_config import (
     load_theme, load_config, log_import, load_state, save_state,
     load_notes, save_notes, load_settings, save_settings,
     load_prayers, save_prayers, load_memory, save_memory,
+    load_bookmarks, save_bookmarks,
     list_translations, _display_name, migrate_data_dir,
 )
 from reader_assets import FONT_FAMILY, STYLESHEET, PAGE_JS, JS_HANDLER
@@ -76,9 +78,17 @@ class OmarchyReader(Gtk.Application, TocMixin, SearchMixin, SettingsMixin, Resou
         self.notes = {}
         self.prayers = []
         self.memory = []
+        self.bookmarks = []
+        self._bookmark_bar = None
+        self._bm_box = None
+        self._bm_buttons = []
+        self._bm_items = []
+        self._bookmark_nav = False
+        self._bookmark_idx = 0
         self._notes_overlay = None
         self._note_panel_height = 300
         self._ps_tab = "notes"
+        self._notes_toggled_at = 0.0
         self._ps_editing = False     # False = navigate mode (keys act), True = typing
         self._ps_tabs = {}
         self._ps_stack = None
@@ -288,6 +298,7 @@ class OmarchyReader(Gtk.Application, TocMixin, SearchMixin, SettingsMixin, Resou
         self._build_notes_overlay()
         self._build_refs_overlay()
         self._build_search_overlay()
+        self._build_bookmark_bar()
         self._build_dock()
         self.loading_overlay_win.add_overlay(self._dock)
 
@@ -449,14 +460,15 @@ class OmarchyReader(Gtk.Application, TocMixin, SearchMixin, SettingsMixin, Resou
 
         self._notes_overlay.pack_start(bar, False, False, 0)
 
-        # Tab bar: 1 Notes · 2 Prayer · 3 Memory.
+        # Tab bar: 1 Notes · 2 Prayer · 3 Memory · 4 Bookmarks.
         tabbar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         tabbar.set_margin_start(16)
         tabbar.set_margin_end(16)
         tabbar.set_margin_bottom(8)
         self._ps_tabs = {}
         self._ps_tab_names = {}
-        for key, name in (("notes", "Notes"), ("prayer", "Prayer"), ("memory", "Memory")):
+        for key, name in (("notes", "Notes"), ("prayer", "Prayer"),
+                          ("memory", "Memory"), ("bookmarks", "Bookmarks")):
             self._ps_tab_names[key] = name
             b = Gtk.Button(label=self._tab_label(name, False))
             b.set_relief(Gtk.ReliefStyle.NONE)
@@ -554,6 +566,27 @@ class OmarchyReader(Gtk.Application, TocMixin, SearchMixin, SettingsMixin, Resou
         mrow.pack_start(mhint, True, True, 0)
         memory_page.pack_start(mrow, False, False, 0)
         stack.add_named(memory_page, "memory")
+
+        # ---- Bookmarks page ----
+        bookmark_page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        bookmark_page.set_margin_start(16)
+        bookmark_page.set_margin_end(16)
+        bookmark_page.set_margin_bottom(12)
+        self.bookmark_list = Gtk.ListBox()
+        self.bookmark_list.set_selection_mode(Gtk.SelectionMode.SINGLE)
+        self.bookmark_list.connect("row-activated", self._on_bm_row_activated)
+        bscroller = Gtk.ScrolledWindow()
+        bscroller.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
+        bscroller.set_vexpand(True)
+        bscroller.add(self.bookmark_list)
+        self.bookmark_scroller = bscroller
+        bookmark_page.pack_start(bscroller, True, True, 0)
+        brow = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        bhint = Gtk.Label(label="j/k move \u00b7 Enter jumps \u00b7 x deletes \u00b7 Ctrl+M bookmarks")
+        bhint.get_style_context().add_class("progress-label")
+        brow.pack_start(bhint, True, True, 0)
+        bookmark_page.pack_start(brow, False, False, 0)
+        stack.add_named(bookmark_page, "bookmarks")
 
         self._notes_overlay.pack_start(stack, True, True, 0)
         self._ps_tab = "notes"
@@ -770,6 +803,7 @@ class OmarchyReader(Gtk.Application, TocMixin, SearchMixin, SettingsMixin, Resou
         self.notes = load_notes()
         self.prayers = load_prayers()
         self.memory = load_memory()
+        self.bookmarks = load_bookmarks()
 
     def _write_notes(self):
         save_notes(self.notes)
@@ -797,6 +831,10 @@ class OmarchyReader(Gtk.Application, TocMixin, SearchMixin, SettingsMixin, Resou
     def _toggle_notes(self):
         if not SETTINGS.get("show_personal_space", True):
             return
+        now = time.monotonic()
+        if now - self._notes_toggled_at < 0.3:
+            return
+        self._notes_toggled_at = now
         if self._notes_overlay.get_visible():
             self._hide_notes()
         else:
@@ -853,6 +891,8 @@ class OmarchyReader(Gtk.Application, TocMixin, SearchMixin, SettingsMixin, Resou
             self._refresh_prayer()
         elif key == "memory":
             self._refresh_memory()
+        elif key == "bookmarks":
+            self._refresh_bookmarks()
         # Focus model: by default we focus the tab BUTTON (navigate mode) so
         # 1/2/3, Tab and i work. Only in "edit" mode do we move focus into the
         # text field (so typing goes there instead of switching tabs).
@@ -860,7 +900,10 @@ class OmarchyReader(Gtk.Application, TocMixin, SearchMixin, SettingsMixin, Resou
         if edit and field is not None:
             field.grab_focus()
         else:
-            self._ps_tabs[key].grab_focus()
+            btn = self._ps_tabs[key]
+            btn.grab_focus()
+            if self.window.get_focus() is not btn:
+                self.window.set_focus(btn)
 
     def _ps_text_field(self, key):
         if key == "notes":
@@ -902,6 +945,8 @@ class OmarchyReader(Gtk.Application, TocMixin, SearchMixin, SettingsMixin, Resou
             self._load_verse_note()
         elif tab == "prayer":
             self._refresh_prayer()
+        elif tab == "bookmarks":
+            self._refresh_bookmarks()
         else:
             self._refresh_memory()
 
@@ -1083,6 +1128,275 @@ class OmarchyReader(Gtk.Application, TocMixin, SearchMixin, SettingsMixin, Resou
             self.memory_list.pack_start(box, False, False, 0)
         self.memory_list.show_all()
 
+    # ---------------- Bookmarks ----------------
+    def _bm_symbol(self):
+        # GameMode turns the bookmark flags into shields.
+        return "\U0001F6E1" if SETTINGS.get("game_mode") else "\u2691"
+
+    def _build_bookmark_bar(self):
+        """A strip of clickable bookmark symbols pinned to the top of content."""
+        scroller = Gtk.ScrolledWindow()
+        scroller.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.NEVER)
+        scroller.set_halign(Gtk.Align.CENTER)
+        scroller.set_valign(Gtk.Align.START)
+        scroller.get_style_context().add_class("bookmark-bar")
+        scroller.set_propagate_natural_width(True)
+        scroller.set_visible(False)
+        self._bm_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+        self._bm_box.set_margin_top(6)
+        self._bm_box.set_margin_bottom(4)
+        self._bm_box.set_margin_start(8)
+        self._bm_box.set_margin_end(8)
+        scroller.add(self._bm_box)
+        self._bookmark_bar = scroller
+        self.loading_overlay_win.add_overlay(self._bookmark_bar)
+
+    def _refresh_bookmark_bar(self):
+        """Rebuild the top symbols to match the open book's bookmarks."""
+        if self._bookmark_bar is None or self._bm_box is None:
+            return
+        for c in self._bm_box.get_children():
+            self._bm_box.remove(c)
+        self._bm_buttons = []
+        self._bm_items = []
+        if not getattr(self, "book_path", None) or not getattr(self, "doc", None):
+            self._bookmark_bar.set_visible(False)
+            return
+        items = [b for b in self.bookmarks if b.get("path") == self.book_path]
+        items = personalspace.bookmarks_sorted(items)
+        if not items:
+            self._bookmark_bar.set_visible(False)
+            return
+        self._bm_items = items
+        sym = self._bm_symbol()
+        for i, bm in enumerate(items):
+            b = Gtk.Button(label=sym)
+            b.set_relief(Gtk.ReliefStyle.NONE)
+            b.set_tooltip_text(f"{bm.get('src','')} \u00b7 {bm.get('label','')}")
+            b.connect("clicked", lambda _w, bm=bm: self._goto_bookmark(bm))
+            self._bm_box.pack_start(b, False, False, 0)
+            self._bm_buttons.append(b)
+        self._bookmark_bar.show_all()
+        self._bookmark_bar.set_visible(True)
+        if self._bookmark_nav:
+            if self._bookmark_idx >= len(self._bm_buttons):
+                self._bookmark_idx = max(0, len(self._bm_buttons) - 1)
+            self._bm_highlight()
+
+    def _toggle_bookmark_current(self):
+        if not self.doc or not self.book_path:
+            return False
+        page = self.current_page or 0
+        label = f"{self.doc.chapter_title()} \u00b7 p.{int(page) + 1}"
+        src = _display_name(self.doc.book_name) if self.doc.book_name else ""
+        self.bookmarks, added = personalspace.add_bookmark(
+            self.bookmarks, self.book_path, src, self.chapter_index,
+            int(page), label,
+        )
+        save_bookmarks(self.bookmarks)
+        self._refresh_bookmark_bar()
+        if self._notes_overlay.get_visible() and getattr(self, "_ps_tab", "") == "bookmarks":
+            self._refresh_bookmarks()
+        return added
+
+    def _bookmark_remove(self, key):
+        self.bookmarks = personalspace.remove_bookmark(self.bookmarks, key)
+        save_bookmarks(self.bookmarks)
+        self._refresh_bookmark_bar()
+        if getattr(self, "_ps_tab", "") == "bookmarks":
+            self._refresh_bookmarks()
+
+    def _goto_bookmark(self, bm):
+        """Jump to a bookmark from a click or the Personal Space list."""
+        self._exit_bookmark_nav()
+        self._jump_to_bookmark(bm)
+
+    def _jump_to_bookmark(self, bm):
+        """Navigate to a bookmark without leaving bookmark-nav mode."""
+        self._hide_help()
+        self._hide_settings()
+        path = bm.get("path")
+        chapter = int(bm.get("chapter") or 0)
+        page = int(bm.get("page") or 0)
+        if not path or not self.doc:
+            return
+        if os.path.exists(path) and path != getattr(self, "book_path", None):
+            self.open_book(path, resume_index=chapter, resume_page_num=page)
+        elif path == getattr(self, "book_path", None):
+            if chapter == self.chapter_index:
+                self._run_js(f"showPage({page});")
+                self.current_page = page
+            else:
+                self._resume_index = chapter
+                self._resume_page_num = page
+                self._do_load_chapter(chapter)
+        self._focus = "content"
+        self._focus_content()
+
+    def _refresh_bookmarks(self):
+        """Personal Space: rebuild the scrollable, keyboard-selectable list."""
+        if not hasattr(self, "bookmark_list"):
+            return
+        for c in self.bookmark_list.get_children():
+            self.bookmark_list.remove(c)
+        items = personalspace.bookmarks_sorted(self.bookmarks)
+        if not items:
+            row = Gtk.ListBoxRow()
+            row.set_selectable(False)
+            lbl = Gtk.Label(label="No bookmarks yet. Press Ctrl+M while reading to save a page.")
+            lbl.get_style_context().add_class("progress-label")
+            lbl.set_halign(Gtk.Align.START)
+            lbl.set_line_wrap(True)
+            lbl.set_margin_top(4)
+            lbl.set_margin_bottom(4)
+            row.add(lbl)
+            self.bookmark_list.add(row)
+            self.bookmark_list.show_all()
+            return
+        row_data = []
+        for bm in items:
+            row = Gtk.ListBoxRow()
+            box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+            box.set_margin_top(3)
+            box.set_margin_bottom(3)
+            box.set_margin_start(8)
+            box.set_margin_end(8)
+            ref = Gtk.Label(label=f"{bm.get('src', '')} \u00b7 {bm.get('label', '')}")
+            ref.set_xalign(0.0)
+            ref.set_line_wrap(True)
+            box.pack_start(ref, False, False, 0)
+            sub = Gtk.Label(label=f"Chapter {int(bm.get('chapter') or 0) + 1} \u00b7 page {int(bm.get('page') or 0) + 1}")
+            sub.set_xalign(0.0)
+            sub.get_style_context().add_class("progress-label")
+            box.pack_start(sub, False, False, 0)
+            row.add(box)
+            row._bm = bm
+            self.bookmark_list.add(row)
+            row_data.append(row)
+        self.bookmark_list.show_all()
+        if row_data:
+            self.bookmark_list.select_row(row_data[0])
+            self._bm_list_scroll()
+
+    def _bm_list_scroll(self):
+        row = self.bookmark_list.get_selected_row()
+        if row is None:
+            return
+        sc = getattr(self, "bookmark_scroller", None)
+        if sc is None:
+            return
+        adj = sc.get_vadjustment()
+        if adj is None:
+            return
+        try:
+            _x, row_y = row.translate_coordinates(self.bookmark_list, 0, 0)
+        except Exception:
+            return
+        if row_y is None:
+            return
+        row_h = row.get_allocation().height or 24
+        view_h = sc.get_allocation().height or 0
+        va = adj.get_value()
+        upper = max(adj.get_upper() - adj.get_page_size(), 0.0)
+        if row_y < va:
+            adj.set_value(max(0, row_y))
+        elif view_h > 0 and row_y + row_h > va + view_h:
+            adj.set_value(min(upper, row_y + row_h - view_h))
+
+    def _bm_list_move(self, delta):
+        rows = [r for r in self.bookmark_list.get_children() if r.get_selectable()]
+        if not rows:
+            return
+        cur = self.bookmark_list.get_selected_row()
+        if cur is None or not cur.get_selectable():
+            idx = 0
+        else:
+            try:
+                idx = self.bookmark_list.get_children().index(cur)
+            except ValueError:
+                idx = 0
+            idx = max(0, min(len(rows) - 1, idx + delta))
+        row = rows[idx]
+        self.bookmark_list.select_row(row)
+        self._bm_list_scroll()
+
+    def _bm_list_open(self):
+        row = self.bookmark_list.get_selected_row()
+        if row is not None and getattr(row, "_bm", None):
+            self._goto_bookmark(row._bm)
+
+    def _bm_list_delete(self):
+        row = self.bookmark_list.get_selected_row()
+        if row is None or not getattr(row, "_bm", None):
+            return
+        try:
+            idx = self.bookmark_list.get_children().index(row)
+        except ValueError:
+            idx = 0
+        key = row._bm["key"]
+        self.bookmarks = personalspace.remove_bookmark(self.bookmarks, key)
+        save_bookmarks(self.bookmarks)
+        self._refresh_bookmark_bar()
+        if getattr(self, "_ps_tab", "") == "bookmarks":
+            self._refresh_bookmarks()
+        rows = [r for r in self.bookmark_list.get_children() if r.get_selectable()]
+        if rows:
+            target = min(idx, len(rows) - 1)
+            self.bookmark_list.select_row(rows[target])
+            self._bm_list_scroll()
+
+    def _on_bm_row_activated(self, listbox, row):
+        if getattr(row, "_bm", None):
+            self._goto_bookmark(row._bm)
+
+    # --- keyboard navigation of the top bookmark symbols ---
+    def _enter_bookmark_nav(self):
+        if not self._bm_buttons:
+            return False
+        self._bookmark_nav = True
+        self._bookmark_idx = 0
+        self._bm_highlight()
+        if self._bookmark_bar is not None:
+            self._bookmark_bar.grab_focus()
+        return True
+
+    def _exit_bookmark_nav(self):
+        self._bookmark_nav = False
+        for b in self._bm_buttons:
+            b.get_style_context().remove_class("bookmark-chip-active")
+
+    def _bm_highlight(self):
+        for i, b in enumerate(self._bm_buttons):
+            if i == self._bookmark_idx:
+                b.get_style_context().add_class("bookmark-chip-active")
+            else:
+                b.get_style_context().remove_class("bookmark-chip-active")
+
+    def _bm_nav(self, delta):
+        n = len(self._bm_buttons)
+        if n == 0:
+            return
+        self._bookmark_idx = (self._bookmark_idx + delta) % n
+        self._bm_highlight()
+        if 0 <= self._bookmark_idx < len(self._bm_items):
+            self._goto_highlighted_bookmark()
+
+    def _goto_highlighted_bookmark(self):
+        if 0 <= self._bookmark_idx < len(self._bm_items):
+            self._jump_to_bookmark(self._bm_items[self._bookmark_idx])
+
+    def _bm_open(self):
+        if 0 <= self._bookmark_idx < len(self._bm_items):
+            self._goto_bookmark(self._bm_items[self._bookmark_idx])
+
+    def _bm_delete(self):
+        """Delete the highlighted top bookmark symbol (stays in nav mode)."""
+        if not (0 <= self._bookmark_idx < len(self._bm_items)):
+            return
+        self._bookmark_remove(self._bm_items[self._bookmark_idx]["key"])
+        if not self._bm_buttons:
+            self._exit_bookmark_nav()
+
     def _apply_theme_css(self):
         css = f"""
             window {{
@@ -1189,6 +1503,23 @@ class OmarchyReader(Gtk.Application, TocMixin, SearchMixin, SettingsMixin, Resou
                 font-weight: bold;
                 padding: 0 12px;
             }}
+            .bookmark-bar {{
+                background-color: alpha({THEME["background"]}, 0.95);
+                border-bottom: 1px solid rgba(255,255,255,0.16);
+                border-radius: 0 0 4px 4px;
+            }}
+            .bookmark-bar button {{
+                border: none;
+                padding: 2px 8px;
+                font-size: 15px;
+            }}
+            .bookmark-bar button:hover {{
+                background: alpha({THEME["accent"]}, 0.25);
+            }}
+            .bookmark-chip-active {{
+                background-color: {THEME["accent"]};
+                color: {THEME["background"]};
+            }}
             .notes-overlay, .refs-overlay, .search-overlay {{
                 border: 1px solid rgba(255,255,255,0.16);
                 border-radius: 0;
@@ -1228,6 +1559,19 @@ class OmarchyReader(Gtk.Application, TocMixin, SearchMixin, SettingsMixin, Resou
             }}
             .note-card label {{
                 color: {THEME["foreground"]};
+            }}
+            .notes-overlay listbox row {{
+                background: transparent;
+            }}
+            .notes-overlay listbox row:hover {{
+                background: alpha({THEME["accent"]}, 0.12);
+            }}
+            .notes-overlay listbox row:selected {{
+                background-color: alpha({THEME["accent"]}, 0.35);
+            }}
+            .notes-overlay listbox row:selected label {{
+                color: {THEME["background"]};
+                font-weight: bold;
             }}
             .notes-scroller {{
                 background-color: transparent;
@@ -1564,6 +1908,9 @@ class OmarchyReader(Gtk.Application, TocMixin, SearchMixin, SettingsMixin, Resou
         )
 
     def show_welcome(self, status_msg=None):
+        self._exit_bookmark_nav()
+        if self._bookmark_bar is not None:
+            self._bookmark_bar.set_visible(False)
         if SETTINGS.get("game_mode"):
             self._show_game_home(status_msg)
             return
@@ -1940,6 +2287,7 @@ document.addEventListener('click', function (e) {{
                 return False
             self.doc = doc
             self.book_path = path
+            self._refresh_bookmark_bar()
             start = 0
             if getattr(self, "_resume_index", None) is not None:
                 start = min(self._resume_index, doc.chapter_count() - 1)
@@ -2252,6 +2600,33 @@ document.addEventListener('click', function (e) {{
         if self._search_overlay is not None and self._search_overlay.get_visible():
             return False
 
+        # Bookmark-symbol navigation mode: h/l move between the top flags AND
+        # jump straight to the highlighted one; Enter jumps again; Esc/q and
+        # Ctrl+J leave the mode back to the reading content.
+        if self._bookmark_nav:
+            if not ctrl and not shift:
+                if kn in ("h", "left"):
+                    self._bm_nav(-1)
+                    return True
+                if kn in ("l", "right"):
+                    self._bm_nav(1)
+                    return True
+                if kn in ("return", "kp_enter"):
+                    self._bm_open()
+                    return True
+                if kn == "x":
+                    self._bm_delete()
+                    return True
+                if kn in ("escape", "q"):
+                    self._exit_bookmark_nav()
+                    self._focus_content()
+                    return True
+            if ctrl and not shift and kn in ("j", "k"):
+                self._exit_bookmark_nav()
+                self._focus_content()
+                return True
+            return True
+
         # "/" opens the go-to-passage search (not while typing elsewhere).
         if not ctrl and not shift and kn == "slash" and self.chapters:
             self._open_search()
@@ -2332,7 +2707,16 @@ document.addEventListener('click', function (e) {{
                 # current verse.
                 self._edit_from_list()
                 return True
+            if not shift and kn == "m":
+                # Ctrl+M toggles a bookmark on the current page.
+                self._toggle_bookmark_current()
+                return True
             if not shift and kn in ("j", "k"):
+                if kn == "k" and self._focus == "content" and self._bm_buttons:
+                    # Ctrl+K from the reading content navigates the top
+                    # bookmark symbols (h/l move, Enter jumps, Esc leaves).
+                    self._enter_bookmark_nav()
+                    return True
                 # Ctrl+j / Ctrl+k move keyboard focus between sections:
                 # content <-> personal notes <-> resources.
                 self._focus_next(forward=(kn == "j"))
@@ -2459,14 +2843,30 @@ document.addEventListener('click', function (e) {{
                     self._set_ref_tab(key)
                     return True
             elif self._focus == "notes":
-                key = {"1": "notes", "2": "prayer", "3": "memory"}.get(kn)
+                key = {"1": "notes", "2": "prayer", "3": "memory", "4": "bookmarks"}.get(kn)
                 if key:
                     self._set_ps_tab(key)
                     return True
 
-        # Personal Space "navigate" mode (focus is a tab button, not typing):
-        # Tab / Shift-Tab cycle tabs, i enters the text field, h/l also switch.
+        # Personal Space "navigate" mode (a PS tab button owns the keyboard, not
+        # the reading pane): on the Bookmarks tab j/k/Enter/x move through, open
+        # and delete bookmarks; i/Tab/h/l switch tabs. This is keyed off
+        # self._focus so that Ctrl+K (which hands focus back to the content)
+        # immediately returns j/k to stepping verses.
         if self._focus == "notes" and not self._ps_editing:
+            if getattr(self, "_ps_tab", "") == "bookmarks" and not ctrl and not shift:
+                if kn in ("j", "down"):
+                    self._bm_list_move(1)
+                    return True
+                if kn in ("k", "up"):
+                    self._bm_list_move(-1)
+                    return True
+                if kn in ("return", "kp_enter"):
+                    self._bm_list_open()
+                    return True
+                if kn == "x":
+                    self._bm_list_delete()
+                    return True
             if not ctrl and kn == "i":
                 self._enter_ps_edit()
                 return True

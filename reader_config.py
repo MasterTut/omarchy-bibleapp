@@ -33,6 +33,7 @@ NOTES_PATH = os.path.join(DATA_DIR, "notes.json")
 SETTINGS_PATH = os.path.join(DATA_DIR, "settings.json")
 PRAYERS_PATH = os.path.join(DATA_DIR, "prayers.json")
 MEMORY_PATH = os.path.join(DATA_DIR, "memory.json")
+BOOKMARKS_PATH = os.path.join(DATA_DIR, "bookmarks.json")
 
 # Fallback palette (Ash) used when the live omarchy theme cannot be read.
 DEFAULT_THEME = {
@@ -185,7 +186,7 @@ def migrate_data_dir():
     try:
         os.makedirs(DATA_DIR, exist_ok=True)
         for name in ("state.json", "notes.json", "settings.json", "prayers.json",
-                     "memory.json", "theme.toml", "config.toml", "lexicon"):
+                     "memory.json", "bookmarks.json", "theme.toml", "config.toml", "lexicon"):
             src = os.path.join(LEGACY_DATA_DIR, name)
             if os.path.isfile(src) or os.path.isdir(src):
                 dst = os.path.join(DATA_DIR, name)
@@ -307,6 +308,14 @@ def load_memory():
 
 def save_memory(items):
     _save_list(MEMORY_PATH, items)
+
+
+def load_bookmarks():
+    return _load_list(BOOKMARKS_PATH)
+
+
+def save_bookmarks(items):
+    _save_list(BOOKMARKS_PATH, items)
 
 
 # ---------------- Settings persistence ----------------

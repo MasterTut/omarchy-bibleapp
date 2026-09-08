@@ -203,7 +203,6 @@ class TocMixin:
                 return False
             adj = self._toc_scroller.get_vadjustment()
             if adj is None:
-                self.toc_list.scroll_to_row(row)
                 return False
             # Translate the row's allocation into the scrolled window's coords.
             alloc = row.get_allocation()

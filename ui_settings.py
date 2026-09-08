@@ -132,6 +132,9 @@ class SettingsMixin:
     def _on_game_mode_toggled(self, switch, active):
         SETTINGS["game_mode"] = bool(active)
         save_settings()
+        # Bookmark flags turn into shields in GameMode.
+        if getattr(self, "_refresh_bookmark_bar", None):
+            self._refresh_bookmark_bar()
         if getattr(self, "_on_home", False):
             self._hide_settings()
             self.show_welcome()
@@ -204,6 +207,9 @@ class SettingsMixin:
             ("Ctrl + R", "Resources panel: Notes · Cross-refs · Intro · Images · Links"),
             ("1 – 3 / 1 – 5", "Switch tabs in the focused panel (Personal Space / Resources)"),
             ("Ctrl + j / k", "Move focus: content ⇄ personal space ⇄ resources"),
+            ("Ctrl + M", "Add / remove a bookmark on the current page (flag at the top)"),
+            ("Ctrl + K (content)", "Walk your bookmarks (h/l auto-jump · x deletes · Ctrl+J/Esc leaves)"),
+            ("Bookmarks tab", "j/k or \u2191/\u2193 move · Enter jumps · x deletes"),
             ("j / k (resources)", "Scroll the Resources panel · h / l switch tabs"),
             ("Ctrl + h / l", "Focus the Personal Space notes editor"),
             ("Ctrl + Shift + H", "Toggle header bar"),

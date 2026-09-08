@@ -118,3 +118,43 @@ def toggle_memory(items, key):
             m["done"] = not m.get("done", False)
         out.append(m)
     return out
+
+
+# ---------------- Bookmarks ----------------
+def bookmark_key(path, chapter, page):
+    """Key for a bookmark on a given chapter page of a book file."""
+    return f"{path}|{int(chapter)}|{int(page)}"
+
+
+def add_bookmark(items, path, src, chapter, page, label):
+    """Add a bookmark for a location.
+
+    A bookmark is unique per (path, chapter, page): adding again at the same
+    location removes the existing one (a toggle). Returns ``(new_items, added)``.
+    """
+    key = bookmark_key(path, chapter, page)
+    kept = [it for it in items if it.get("key") != key]
+    if len(kept) != len(items):
+        return kept, False
+    kept.append({
+        "id": _next_id(kept),
+        "key": key,
+        "path": path,
+        "src": src,             # translation display name (ASV, KJV, …)
+        "chapter": int(chapter),
+        "page": int(page),
+        "label": label,
+    })
+    return kept, True
+
+
+def remove_bookmark(items, key):
+    return [it for it in items if it.get("key") != key]
+
+
+def bookmarks_sorted(items):
+    """Bookmarks ordered by translation, then chapter, then page."""
+    return sorted(
+        items,
+        key=lambda b: (str(b.get("src", "")), int(b.get("chapter") or 0), int(b.get("page") or 0)),
+    )

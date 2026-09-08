@@ -65,7 +65,19 @@ typography and layout while staying true to the Omarchy look.
 - `Ctrl + S` — settings
 - `Ctrl + h` / `Ctrl + l` — focus the Personal Space notes editor
 - `Ctrl + j` / `Ctrl + k` — move focus between content ⇄ personal space ⇄
-  resources (also works while typing; only cycles panels that are open)
+  resources (also works while typing; only cycles panels that are open). From
+  the reading content, `Ctrl + K` instead walks the page's bookmark flags (see
+  below)
+- `Ctrl + M` — add a bookmark on the current page; a small flag `⚑` appears at
+  the top of the window (a shield `🛡` in GameMode). Press `Ctrl + M` again on
+  that page to remove it. Click a flag to jump to that page, or press
+  `Ctrl + K` while reading: `h`/`l` move between the flags **and jump to each
+  one as you go**; `x` deletes the highlighted one; `Ctrl + J` (or `Esc`/`q`)
+  returns to the reading content.
+  All bookmarks (across every translation) are listed on the **Bookmarks** tab
+  of Personal Space — `Ctrl + P` then tab `4` — as a quick-reference scroll
+  list: `j`/`k` or the arrows move the selection (without jumping), `Enter`
+  jumps to the highlighted one, `x` deletes it, and double-click jumps too
 - Mouse: click the reading area, the Personal Space panel, or the resources
   panel to move focus there directly
 - `Ctrl + Shift + K` — keybinding reference

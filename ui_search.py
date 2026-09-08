@@ -57,6 +57,7 @@ class SearchMixin:
         list_scroll.set_propagate_natural_height(True)
         list_scroll.set_max_content_height(300)
         list_scroll.add(self._search_list)
+        self._search_list_scroller = list_scroll
         self._search_overlay.pack_start(list_scroll, False, False, 0)
 
         # Verse preview panel: shown when Enter is pressed on a result. It sits
@@ -246,14 +247,42 @@ class SearchMixin:
         if count == 0:
             return
         cur = self._search_list.get_selected_row()
-        idx = self._search_list.get_row_index(cur) if cur else 0
+        if cur is not None:
+            try:
+                idx = self._search_list.get_children().index(cur)
+            except ValueError:
+                idx = 0
+        else:
+            idx = 0
         idx = max(0, min(count - 1, idx + delta))
         row = self._search_list.get_row_at_index(idx)
         if row is not None:
             self._search_list.select_row(row)
-            self._search_list.scroll_to(row)
+            self._search_scroll_to_row(row)
             if self._search_preview_is_open():
                 self._show_search_preview(getattr(row, "_search_data", None))
+
+    def _search_scroll_to_row(self, row):
+        sc = getattr(self, "_search_list_scroller", None)
+        if sc is None:
+            return
+        adj = sc.get_vadjustment()
+        if adj is None:
+            return
+        try:
+            _x, row_y = row.translate_coordinates(self._search_list, 0, 0)
+        except Exception:
+            return
+        if row_y is None:
+            return
+        row_h = row.get_allocation().height or 24
+        view_h = sc.get_allocation().height or 0
+        va = adj.get_value()
+        upper = max(adj.get_upper() - adj.get_page_size(), 0.0)
+        if row_y < va:
+            adj.set_value(max(0, row_y))
+        elif view_h > 0 and row_y + row_h > va + view_h:
+            adj.set_value(min(upper, row_y + row_h - view_h))
 
     def _on_search_row_activated(self, listbox, row):
         # Double-click (or Enter on the focused list) opens the passage.
