@@ -1,4 +1,4 @@
-# Omarchy-Bible
+# OmaBible
 
 A minimal, beautiful EPUB e-reader/bible for Linux, styled after the **Omarchy Ash
 theme**.
@@ -16,7 +16,7 @@ typography and layout while staying true to the Omarchy look.
   loaded into the editor with `Ctrl + l` and saved in place; a New button always
   lets you start a fresh note
 - Notes show the referenced verse or `General notes` next to the timestamp
-- Settings panel (`Ctrl + S`) with auto-hide top bar toggle (persisted to `settings.json`)
+- Settings panel (`Ctrl + S`) with auto-hide top bar and **GameMode** toggles (persisted to `settings.json`)
 - Toggleable header (`Ctrl + Shift + H`)
 - Hierarchical table of contents (`Ctrl + T`): books → chapters → verses, navigable with arrow keys and Neo-Vim `j`/`k`
 - Paginated reading (page breaks fit the viewport, no scrolling the text)
@@ -31,11 +31,13 @@ typography and layout while staying true to the Omarchy look.
   study Bibles (e.g. Crossway ESV) it surfaces the per-book introduction,
   images/maps/charts (click to open in your viewer), and external web links
   (click to open in your browser)
-- **Offline original-language word study** (`i` in the reader): enter word mode
-  and step through the Hebrew (OT) or Greek (NT) words of the current verse with
-  `h`/`l`; the **Word** tab of the Resources panel shows each word's original
-  script, transliteration, parsing, Strong's number and definition. The
-  interlinear + Strong's data ships offline under `data/lexicon/`
+- **Offline original-language reference**: the **Word** tab of the Resources
+  panel lists the Hebrew (OT) or Greek (NT) words of the current verse with
+  original script, transliteration, parsing, Strong's number and definition.
+  The interlinear + Strong's data ships offline under `data/lexicon/`
+- **GameMode** (Settings → GameMode): the library becomes a Zelda scene —
+  *IT'S DANGEROUS TO GO ALONE! TAKE THIS.* The torches (or `h`/`l`) cycle
+  translations and the sword (or `Enter`) continues reading in the selected one
 - Paragraphs are automatically split so each verse appears on its own line
   (Crossway-style EPUBs with many verses per paragraph are reformatted on load)
 - Notes record the highlighted verse next to the timestamp (`… · v. 5`);
@@ -69,13 +71,21 @@ typography and layout while staying true to the Omarchy look.
 - `Ctrl + Shift + K` — keybinding reference
 - `Ctrl + Shift + H` — toggle header
 - `Ctrl + [` — home / translations browser
-- `/` — search a book or passage (e.g. `John 3:16`, `gen 50`, `ps 23`); `↑/↓`
-  select, `Enter` jumps to the chapter (and highlights the verse), `Esc` closes
+- `/` — search a book or passage (e.g. `John 3:16`, `gen 1`, `gen 1:20-30`,
+  `ps 23`). Results auto-complete as you type, showing what's available to
+  preview (e.g. *Genesis · 50 chapters*, *Genesis 1 · 31 verses*, *1:20-30 of
+  31 verses*). `↑/↓` select; `Enter` opens a preview of the highlighted verse,
+  whole chapter, or range at the bottom of the search bar; `q` / `Esc` close
+  the preview (a second `Enter` — or the `Open` button — jumps to the passage);
+  `Esc` with no preview closes search. After a jump, `Backspace` returns to the
+  verse you were reading before the jump
 - `Ctrl + B` — toggle reader mode
 - `Ctrl + O` — open a book file (disabled on the home screen)
 - `Ctrl + I` — import an EPUB into the library (on Home: `i`)
 - On the home screen: `j` / `k` select Continue where you left off /
-  Translations / Import EPUB, Enter opens
+  Translations / Import EPUB, Enter opens. In **GameMode** the fires (or
+  `h`/`l`/`j`/`k`) cycle translations and `Enter` takes the sword to continue
+  reading in the selected one
 - `H` / `L` / `←` / `→` — previous / next page (always left / right)
 - `J` / `K` / `↑` / `↓` (case-insensitive) — with a note highlighted: move up /
   down the notes; with content focused: step through the verses (j/↓ down, k/↑ up)
@@ -94,7 +104,7 @@ typography and layout while staying true to the Omarchy look.
 
 The bundled installer provisions system packages (via your package manager),
 creates the project virtualenv, installs the Python deps, and wires up the
-`omarchy-bible` command plus (on Linux) the desktop entry + icon.
+`omabible` command plus (on Linux) the desktop entry + icon.
 
 ```bash
 ./install.sh              # current user (~/.local)
@@ -104,13 +114,17 @@ creates the project virtualenv, installs the Python deps, and wires up the
 Then run:
 
 ```bash
-omarchy-bible                      # home screen
-omarchy-bible /path/to/book.epub   # open a book directly
+omabible                      # home screen
+omabible /path/to/book.epub   # open a book directly
 # or from the repo:
 ./run.sh
 ```
 
 Within the app, use **Open Book** in the header or `Ctrl+O`.
+
+User data (reading state, notes, prayers, memory, settings, theme) lives in
+`~/.config/omabible/`. If you ran a pre-rename build, the old
+`~/.config/omarchy-bible/` files are copied across automatically on first launch.
 
 Users bring their own EPUB translations. Drop public-domain EPUBs (e.g. ASV,
 KJV) into `translations/` (see `.gitignore` — only ASV and KJV are tracked).
@@ -119,11 +133,11 @@ KJV) into `translations/` (see `.gitignore` — only ASV and KJV are tracked).
 
 The app reads its colour palette with this precedence:
 
-1. `~/.config/omarchy-bible/theme.toml` (user-defined — works on any platform)
+1. `~/.config/omabible/theme.toml` (user-defined — works on any platform)
 2. the live Omarchy palette (`~/.local/state/omarchy/current/theme/colors.toml`)
 3. the built-in Ash default
 
-Copy `theme.toml.example` to `~/.config/omarchy-bible/theme.toml` to set your
+Copy `theme.toml.example` to `~/.config/omabible/theme.toml` to set your
 own colours — this is the recommended way to theme the app on macOS (or any
 non-Omarchy system) where the Omarchy live palette is not present.
 
@@ -132,7 +146,7 @@ non-Omarchy system) where the Omarchy live palette is not present.
 ```
 main.py             # app shell: window, dock, mode line, key handling, navigation
 ui_toc.py           # books → chapters → verses table-of-contents overlay (mixins)
-ui_resources.py     # tabbed Resources panel (notes / cross-refs / word study)
+ui_resources.py     # tabbed Resources panel (notes / cross-refs / interlinear)
 ui_settings.py      # settings + keybinding-reference overlays
 ui_search.py        # "go to passage" search overlay
 lexicon.py          # offline interlinear + Strong's lookup (GTK-free)

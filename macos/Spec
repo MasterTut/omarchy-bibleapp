@@ -1,6 +1,6 @@
 # -*- mode: python ; coding: utf-8 -*-
 #
-# PyInstaller spec: builds Omarchy-Bible.app for macOS.
+# PyInstaller spec: builds OmaBible.app for macOS.
 # Run via macos/build_app.sh (which installs deps + runs pyinstaller).
 #
 # Bundles the source modules, the bundled translations/, and the offline
@@ -50,7 +50,7 @@ exe = EXE(
     pyz,
     a.scripts,
     exclude_binaries=True,
-    name="OmarchyBible",
+    name="OmaBible",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -68,16 +68,16 @@ coll = COLLECT(
     a.datas,
     strip=False,
     upx=False,
-    name="OmarchyBible",
+    name="OmaBible",
 )
 
 app = BUNDLE(
     exe,
-    name="Omarchy-Bible.app",
-    icon="org.omarchy.Bible.icns",
-    bundle_identifier="org.omarchy.Bible",
+    name="OmaBible.app",
+    icon="org.omabible.icns",
+    bundle_identifier="org.omabible",
     info_plist={
-        "CFBundleDisplayName": "Omarchy-Bible",
+        "CFBundleDisplayName": "OmaBible",
         "CFBundleShortVersionString": "1.0.0",
         "CFBundleVersion": "1.0.0",
         "NSHighResolutionCapable": True,

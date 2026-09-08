@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
-# Wrap the built Omarchy-Bible.app into a distributable .dmg.
+# Wrap the built OmaBible.app into a distributable .dmg.
 #
-#   ./macos/make_dmg.sh [path/to/Omarchy-Bible.app]
+#   ./macos/make_dmg.sh [path/to/OmaBible.app]
 #
-# Produces dist/Omarchy-Bible-<version>.dmg (drag-to-Applications style).
+# Produces dist/OmaBible-<version>.dmg (drag-to-Applications style).
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 API_DIR="$(dirname "$0")"
-APP="${1:-$ROOT/dist/Omarchy-Bible.app}"
+APP="${1:-$ROOT/dist/OmaBible.app}"
 VERSION="${VERSION:-1.0.0}"
 
 if [ ! -d "$APP" ]; then
@@ -16,26 +16,26 @@ if [ ! -d "$APP" ]; then
     exit 1
 fi
 
-OUT="$ROOT/dist/Omarchy-Bible-${VERSION}.dmg"
+OUT="$ROOT/dist/OmaBible-${VERSION}.dmg"
 mkdir -p "$ROOT/dist"
 
 if command -v create-dmg >/dev/null 2>&1; then
     echo "==> Using create-dmg"
     create-dmg \
-        --volname "Omarchy-Bible" \
+        --volname "OmaBible" \
         --window-pos 200 120 \
         --window-size 660 400 \
         --icon-size 128 \
         --app-drop-link 480 220 \
-        --icon "Omarchy-Bible.app" 140 220 \
-        --hide-extension "Omarchy-Bible.app" \
+        --icon "OmaBible.app" 140 220 \
+        --hide-extension "OmaBible.app" \
         "$OUT" "$APP"
 else
     echo "==> Using hdiutil (Drag-to-Applications layout)"
     STAGE="$(mktemp -d)"
     cp -R "$APP" "$STAGE/"
     ln -s /Applications "$STAGE/Applications"
-    hdiutil create -volname "Omarchy-Bible" -srcfolder "$STAGE" \
+    hdiutil create -volname "OmaBible" -srcfolder "$STAGE" \
         -ov -format UDZO "$OUT" >/dev/null
     rm -rf "$STAGE"
 fi

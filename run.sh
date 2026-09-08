@@ -1,5 +1,5 @@
 #!/bin/bash
-# Omarchy-Bible launcher.
+# OmaBible launcher.
 # Automatically creates & provisions the project virtualenv on first run,
 # then runs the app with THAT venv's Python (so ebooklib is always available).
 

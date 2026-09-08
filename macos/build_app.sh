@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
-# Build Omarchy-Bible.app for macOS.
+# Build OmaBible.app for macOS.
 #
 #   ./macos/build_app.sh
 #
 # What it does:
 #   1. Installs Homebrew deps if missing (GTK3, WebKitGTK, GI, Python).
 #   2. Creates/updates a build venv and installs Python deps.
-#   3. Generates an .icns icon from org.omarchy.Bible.svg (best effort).
-#   4. Runs PyInstaller with macos/Spec to produce Omarchy-Bible.app.
+#   3. Generates an .icns icon from org.omabible.svg (best effort).
+#   4. Runs PyInstaller with macos/Spec to produce OmaBible.app.
 #
 # The resulting .app can be wrapped into a .dmg or .pkg with the helpers
 # in this directory (make_dmg.sh / make_pkg.sh).
@@ -17,7 +17,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 API_DIR="$(dirname "$0")"
 PY="${PYTHON:-python3}"
 
-echo "==> Omarchy-Bible macOS build (root: $ROOT)"
+echo "==> OmaBible macOS build (root: $ROOT)"
 
 # ----------------------- 1. Homebrew dependencies -----------------------
 if ! command -v brew >/dev/null 2>&1; then
@@ -49,14 +49,14 @@ echo "==> Setting up build venv: $VENV"
 "$VENV/bin/pip" install --quiet pyinstaller ebooklib pygobject
 
 # ----------------------- 3. Icon (.icns) -----------------------
-ICNS="$API_DIR/org.omarchy.Bible.icns"
+ICNS="$API_DIR/org.omabible.icns"
 if [ ! -f "$ICNS" ]; then
     echo "==> Generating $ICNS from the SVG (best effort)"
-    ICONSET="$API_DIR/OmarchyBible.iconset"
+    ICONSET="$API_DIR/OmaBible.iconset"
     mkdir -p "$ICONSET"
     # Render the SVG to a large PNG via Apple's Quick Look.
-    ( cd "$API_DIR" && qlmanage -t -s 1024 -o . org.omarchy.Bible.svg >/dev/null 2>&1 ) || true
-    PNG="$API_DIR/org.omarchy.Bible.svg.png"
+    ( cd "$API_DIR" && qlmanage -t -s 1024 -o . org.omabible.svg >/dev/null 2>&1 ) || true
+    PNG="$API_DIR/org.omabible.svg.png"
     if [ -f "$PNG" ]; then
         for size in 16 32 64 128 256 512 1024; do
             sips -z "$size" "$size" "$PNG" \
@@ -69,10 +69,10 @@ if [ ! -f "$ICNS" ]; then
 fi
 
 # ----------------------- 4. PyInstaller build -----------------------
-echo "==> Building Omarchy-Bible.app (this takes a while)"
+echo "==> Building OmaBible.app (this takes a while)"
 cd "$ROOT"
 "$VENV/bin/pyinstaller" --noconfirm --clean "macos/Spec"
 
 echo ""
-echo "==> Done. Bundle at: $ROOT/dist/Omarchy-Bible.app"
+echo "==> Done. Bundle at: $ROOT/dist/OmaBible.app"
 echo "    Next: wrap it with ./macos/make_dmg.sh or ./macos/make_pkg.sh"

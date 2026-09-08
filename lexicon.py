@@ -1,7 +1,7 @@
 """Offline interlinear + Strong's lexicon (GTK-free, testable).
 
 Data lives in JSON under a data dir (repo ``data/lexicon`` by default, or
-``~/.config/omarchy-bible/lexicon`` if present). Expected files:
+``~/.config/omabible/lexicon`` if present). Expected files:
 
 - nt.json  / ot.json : {"<book>:<chapter>:<verse>": [word, ...]}
   where word = {"w","lemma","translit","pos","strongs"} (strongs like "G1722"
@@ -39,7 +39,7 @@ if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
     _PKG_DIR = sys._MEIPASS
 else:
     _PKG_DIR = os.path.dirname(os.path.abspath(__file__))
-_USER_DIR = os.path.expanduser("~/.config/omarchy-bible/lexicon")
+_USER_DIR = os.path.expanduser("~/.config/omabible/lexicon")
 _REPO_DIR = os.path.join(_PKG_DIR, "data", "lexicon")
 
 # Where the sample data ships for now (a handful of real verses).

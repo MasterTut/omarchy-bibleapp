@@ -96,6 +96,47 @@ class SettingsMixin:
 
         self._settings_overlay.pack_start(row3, False, False, 0)
 
+        row4 = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        row4.set_margin_start(16)
+        row4.set_margin_end(16)
+        row4.set_margin_top(8)
+        row4.set_margin_bottom(16)
+
+        label_box4 = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        lbl4 = Gtk.Label(label="GameMode")
+        lbl4.set_xalign(0.0)
+        lbl4.set_halign(Gtk.Align.START)
+        label_box4.pack_start(lbl4, False, False, 0)
+        sub4 = Gtk.Label(
+            label="Turn the library into a Zelda screen: the sword continues "
+            "where you left off, the fires cycle translations (h / l)."
+        )
+        sub4.get_style_context().add_class("progress-label")
+        sub4.set_xalign(0.0)
+        sub4.set_halign(Gtk.Align.START)
+        sub4.set_line_wrap(True)
+        label_box4.pack_start(sub4, False, False, 0)
+
+        switch4 = Gtk.Switch()
+        switch4.set_active(SETTINGS.get("game_mode", False))
+        switch4.set_halign(Gtk.Align.END)
+        switch4.set_valign(Gtk.Align.CENTER)
+        switch4.connect("state-set", self._on_game_mode_toggled)
+        self._game_mode_switch = switch4
+
+        row4.pack_start(label_box4, True, True, 0)
+        row4.pack_start(switch4, False, False, 0)
+
+        self._settings_overlay.pack_start(row4, False, False, 0)
+
+    def _on_game_mode_toggled(self, switch, active):
+        SETTINGS["game_mode"] = bool(active)
+        save_settings()
+        if getattr(self, "_on_home", False):
+            self._hide_settings()
+            self.show_welcome()
+        return False
+
     def _on_show_personal_space_toggled(self, switch, active):
         SETTINGS["show_personal_space"] = bool(active)
         save_settings()
@@ -124,6 +165,8 @@ class SettingsMixin:
         self._settings_overlay.show_all()
         self._settings_overlay.set_visible(True)
         self._auto_hide_switch.set_active(SETTINGS.get("auto_hide_header", True))
+        if hasattr(self, "_game_mode_switch") and self._game_mode_switch is not None:
+            self._game_mode_switch.set_active(SETTINGS.get("game_mode", False))
 
     def _hide_settings(self):
         self._settings_overlay.set_visible(False)
@@ -157,6 +200,7 @@ class SettingsMixin:
             ("Ctrl + T", "Table of contents: books · chapters · verses (j/k, Enter, h/Back)"),
             ("Ctrl + P", "Personal Space: Notes · Prayer · Memory (tabs 1-3)"),
             ("/", "Search a book or passage (e.g. John 3:16) · Enter jumps there"),
+            ("Backspace", "After a search jump, return to the verse you were reading before"),
             ("Ctrl + R", "Resources panel: Notes · Cross-refs · Intro · Images · Links"),
             ("1 – 3 / 1 – 5", "Switch tabs in the focused panel (Personal Space / Resources)"),
             ("Ctrl + j / k", "Move focus: content ⇄ personal space ⇄ resources"),
@@ -167,7 +211,6 @@ class SettingsMixin:
             ("Ctrl + Shift + K", "Keybindings reference"),
             ("Home", "Go to the library / choose a translation"),
             ("Ctrl + [", "Exit the notes editor back to tab select"),
-            ("i (content)", "Word study: h/l cycle words, j/k verses, Word tab shows parse"),
             ("Ctrl + B", "Toggle reader mode"),
             ("Ctrl + I", "Import an EPUB into the library"),
             ("Ctrl + O", "Open a book file (in the reader)"),

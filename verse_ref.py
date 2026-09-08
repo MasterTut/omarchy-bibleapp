@@ -3,8 +3,11 @@
 ``books`` is the same structure EpubSource builds: a list of
 ``{"title": str, "chapters": [{"title": str, "index": int}, ...]}``.
 
-``search()`` turns a query like "gen", "John 3:16", "1 cor 13" or
-"psalm 23 1" into a ranked list of jump targets.
+``search()`` turns a query like "gen", "John 3:16", "1 cor 13",
+"psalm 23 1" or "Genesis 1:20-30" into a ranked list of jump targets. Each
+result puts the available scope in the row so the UI can auto-complete:
+book rows carry ``chapters_total`` and chapter/verse/range rows carry
+``verses_total`` (when a ``verse_count`` callback is supplied).
 """
 import re
 
@@ -75,35 +78,57 @@ def _find_books(books, book_query):
     return [b for _, _, b in scored]
 
 
-def search(books, query, limit=20):
-    """Return ranked jump targets: {label, chapter_index, verse, kind}."""
+def search(books, query, limit=20, verse_count=None):
+    """Return ranked jump targets: {label, chapter_index, verse, kind, ...}.
+
+    Kinds are ``book`` (whole book), ``chapter`` (whole chapter),
+    ``verse`` (single verse) and ``range`` (``Genesis 1:20-30``). Chapter,
+    verse and range rows gain ``verse_end``/``verses_total`` when a
+    ``verse_count`` callback (global chapter index -> verse count) is given.
+    """
     q = (query or "").strip()
     if not q or not books:
         return []
     results, seen = [], set()
 
-    m = re.match(r"^(.*?)[\s]+(\d+)(?:[\s:.]+(\d+))?$", q)
+    m = re.match(r"^(.*?)\s+(\d+)(?:[\s:.]+(\d+)(?:-(\d+))?)?$", q)
     book_part = m.group(1).strip() if m else q
     chapter = int(m.group(2)) if m else None
     verse = int(m.group(3)) if (m and m.group(3)) else None
+    verse_end = int(m.group(4)) if (m and m.group(4)) else None
 
-    # Exact "book chapter[:verse]" first.
+    if verse_end is not None and verse is not None and verse_end < verse:
+        verse, verse_end = verse_end, verse
+
+    # Exact "book chapter[:verse[-end]]" first.
     if chapter is not None:
         for b in _find_books(books, book_part):
             nums = _chapter_numbers(b["chapters"])
             if chapter in nums:
                 idx = nums[chapter]
-                key = ("v", idx, verse)
+                kind = "range" if (verse is not None and verse_end is not None) else (
+                    "verse" if verse is not None else "chapter"
+                )
+                label = f"{b['title']} {chapter}"
+                if verse is not None:
+                    label += f":{verse}"
+                    if verse_end is not None:
+                        label += f"-{verse_end}"
+                key = ("c", idx, verse, verse_end)
                 if key in seen:
                     continue
                 seen.add(key)
-                label = f"{b['title']} {chapter}"
-                if verse:
-                    label += f":{verse}"
-                results.append({
+                row = {
                     "label": label, "chapter_index": idx,
-                    "verse": verse or 0, "kind": "verse",
-                })
+                    "verse": verse or 0, "kind": kind,
+                }
+                if verse_end is not None:
+                    row["verse_end"] = verse_end
+                if verse_count is not None:
+                    total = verse_count(idx)
+                    if total:
+                        row["verses_total"] = total
+                results.append(row)
                 if len(results) >= limit:
                     return results
 
@@ -119,6 +144,7 @@ def search(books, query, limit=20):
         results.append({
             "label": b["title"], "chapter_index": idx,
             "verse": 0, "kind": "book",
+            "chapters_total": len(b["chapters"]),
         })
         if len(results) >= limit:
             break

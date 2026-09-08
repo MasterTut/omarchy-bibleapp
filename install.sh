@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Omarchy-Bible installer.
+# OmaBible installer.
 #
 # Provisions system + Python dependencies, creates the project virtualenv,
 # installs the launcher command and, on Linux, the desktop entry + icon.
@@ -10,10 +10,10 @@
 set -euo pipefail
 
 DIR="$(cd "$(dirname "$0")" && pwd)"
-APP_NAME="omarchy-bible"
-ICON_SRC="$DIR/org.omarchy.Bible.svg"
+APP_NAME="omabible"
+ICON_SRC="$DIR/org.omabible.svg"
 
-echo "==> Omarchy-Bible installer"
+echo "==> OmaBible installer"
 
 # ------------------------- system dependencies -------------------------
 install_system() {
@@ -76,15 +76,15 @@ EOF
     "${SUDO[@]}" chmod +x "$BIN_DIR/$APP_NAME"
 
     # Desktop entry (absolute Exec path, no hardcoded user paths in the repo)
-    "${SUDO[@]}" tee "$APP_DIR/org.omarchy.Bible.desktop" >/dev/null <<EOF
+    "${SUDO[@]}" tee "$APP_DIR/org.omabible.desktop" >/dev/null <<EOF
 [Desktop Entry]
 Type=Application
 Version=1.0
-Name=Omarchy-Bible
+Name=OmaBible
 GenericName=Bible Reader
 Comment=Read EPUB Bibles, styled after your Omarchy theme
 Exec=$BIN_DIR/$APP_NAME %F
-Icon=org.omarchy.Bible
+Icon=org.omabible
 Terminal=false
 Categories=Office;Viewer;Literature;
 Keywords=bible;epub;reader;scripture;
@@ -93,7 +93,7 @@ StartupWMClass=$APP_NAME
 EOF
 
     # Icon (SVG)
-    "${SUDO[@]}" cp "$ICON_SRC" "$ICON_DIR/org.omarchy.Bible.svg"
+    "${SUDO[@]}" cp "$ICON_SRC" "$ICON_DIR/org.omabible.svg"
 
     "${SUDO[@]}" update-desktop-database "$APP_DIR" 2>/dev/null || true
     echo "==> Installed launcher + desktop entry ($BIN_DIR/$APP_NAME)"

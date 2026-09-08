@@ -6,7 +6,7 @@ import sys
 import tomllib
 
 
-APP_ID = "org.omarchy.Bible"
+APP_ID = "org.omabible"
 
 
 def _root_dir():
@@ -25,7 +25,9 @@ BASE_DIR = _root_dir()
 TRANSLATIONS_DIR = os.path.join(BASE_DIR, "translations")
 
 # User data dir for state + notes.
-DATA_DIR = os.path.expanduser("~/.config/omarchy-bible")
+DATA_DIR = os.path.expanduser("~/.config/omabible")
+# Pre-rename location; migrated once into DATA_DIR (see migrate_data_dir).
+LEGACY_DATA_DIR = os.path.expanduser("~/.config/omarchy-bible")
 STATE_PATH = os.path.join(DATA_DIR, "state.json")
 NOTES_PATH = os.path.join(DATA_DIR, "notes.json")
 SETTINGS_PATH = os.path.join(DATA_DIR, "settings.json")
@@ -100,7 +102,7 @@ def _pick(colors):
 def load_theme():
     """Read theme colours into the global THEME.
 
-    Precedence: user theme file (~/.config/omarchy-bible/theme.toml) >
+    Precedence: user theme file (~/.config/omabible/theme.toml) >
     live omarchy palette > built-in Ash default. So themes work on any
     platform, not only Omarchy.
     """
@@ -116,8 +118,8 @@ def load_theme():
     return True
 
 
-# ~/.config/omarchy-bible/config.toml  (user-editable hotkeys)
-CONFIG_PATH = os.path.expanduser("~/.config/omarchy-bible/config.toml")
+# ~/.config/omabible/config.toml  (user-editable hotkeys)
+CONFIG_PATH = os.path.expanduser("~/.config/omabible/config.toml")
 
 DEFAULT_HOTKEYS = {
     "font_increase": "Ctrl+equal",
@@ -168,6 +170,33 @@ def load_config():
 
 def _ensure_data_dir():
     os.makedirs(DATA_DIR, exist_ok=True)
+
+
+def migrate_data_dir():
+    """One-time copy of user data from the pre-rename config dir.
+
+    If the new ``~/.config/omabible`` dir does not yet exist but the legacy
+    ``~/.config/omarchy-bible`` dir does, its user files (state, notes,
+    settings, prayers, memory, theme, hotkeys) are copied across. Copy (not
+    move) so nothing is lost.
+    """
+    if os.path.isdir(DATA_DIR) or not os.path.isdir(LEGACY_DATA_DIR):
+        return
+    try:
+        os.makedirs(DATA_DIR, exist_ok=True)
+        for name in ("state.json", "notes.json", "settings.json", "prayers.json",
+                     "memory.json", "theme.toml", "config.toml", "lexicon"):
+            src = os.path.join(LEGACY_DATA_DIR, name)
+            if os.path.isfile(src) or os.path.isdir(src):
+                dst = os.path.join(DATA_DIR, name)
+                if os.path.isdir(src):
+                    import shutil
+                    shutil.copytree(src, dst, dirs_exist_ok=True)
+                else:
+                    import shutil
+                    shutil.copy2(src, dst)
+    except Exception:
+        pass
 
 
 def log_import(msg):
@@ -286,6 +315,7 @@ DEFAULT_SETTINGS = {
     "auto_hide_header": True,
     "note_panel_height": 300,
     "show_personal_space": True,
+    "game_mode": False,
 }
 
 SETTINGS = dict(DEFAULT_SETTINGS)

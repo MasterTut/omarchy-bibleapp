@@ -100,12 +100,6 @@ STYLESHEET = """
     border-left: 3px solid {accent};
     padding-left: 0.6em;
   }}
-  body.word-mode {{
-    cursor: crosshair;
-  }}
-  body.word-mode .page {{
-    user-select: none;
-  }}
   #container {{
     position: absolute;
     left: 0; right: 0; top: 0; bottom: 0;
@@ -240,6 +234,111 @@ STYLESHEET = """
   .focused {{
     outline: 2px solid {accent};
     outline-offset: 2px;
+  }}
+
+  /* ---- GameMode home (Zelda-style) ---- */
+  .game {{
+    position: fixed;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 18px;
+    text-align: center;
+  }}
+  .game-quote {{
+    font-size: {section_fs}px;
+    font-weight: bold;
+    letter-spacing: 0.18em;
+    color: {accent};
+    text-shadow: 0 0 18px alpha({accent}, 0.5);
+    line-height: 1.5;
+  }}
+  .game-quote .t {{
+    display: block;
+  }}
+  .game-cave {{
+    display: flex;
+    flex-direction: row;
+    align-items: flex-end;
+    gap: 64px;
+    padding: 24px 0;
+  }}
+  .game-fire {{
+    width: 64px;
+    height: 96px;
+    cursor: pointer;
+    opacity: 0.85;
+    transition: opacity 0.15s ease, transform 0.15s ease;
+  }}
+  .game-fire:hover {{
+    opacity: 1;
+    transform: translateY(-4px);
+  }}
+  .game-fire.flame-r:hover {{
+    transform: translateY(-4px) scaleX(-1);
+  }}
+  .game-fire .flame {{
+    animation: fire-flicker 1.4s ease-in-out infinite;
+    transform-origin: 50% 100%;
+  }}
+  .game-fire.flame-r .flame {{
+    animation-delay: 0.4s;
+  }}
+  @keyframes fire-flicker {{
+    0%, 100% {{ transform: scale(1, 1); opacity: 0.9; }}
+    50% {{ transform: scale(1.06, 1.12); opacity: 1; }}
+  }}
+  .game-sword {{
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 10px;
+    cursor: pointer;
+    color: {foreground};
+    text-decoration: none;
+    transition: transform 0.15s ease, filter 0.15s ease;
+  }}
+  .game-sword:hover {{
+    transform: translateY(-4px);
+    filter: drop-shadow(0 0 12px alpha({accent}, 0.9));
+  }}
+  .game-sword svg {{
+    display: block;
+  }}
+  .game-sword-label {{
+    font-size: {item_fs}px;
+    letter-spacing: 0.12em;
+    color: {accent};
+  }}
+  .game-name {{
+    color: {foreground};
+    font-size: {item_fs}px;
+    font-weight: bold;
+    letter-spacing: 0.08em;
+  }}
+  .game-sub {{
+    color: {muted};
+    font-size: 13px;
+  }}
+  .game-footer {{
+    position: fixed;
+    bottom: 28px;
+    left: 0;
+    right: 0;
+    text-align: center;
+    color: {muted};
+    font-size: 12px;
+    opacity: 0.7;
+  }}
+  .game-status {{
+    background: alpha({accent}, 0.12);
+    border: 1px solid {accent};
+    border-radius: 8px;
+    padding: 10px 14px;
+    color: {foreground};
+    margin-bottom: 6px;
   }}
 </style>
 """
@@ -475,120 +574,6 @@ document.addEventListener('click', function (e) {
   }
   post({type: 'ref', label: label, text: text});
 });
-
-// ---- Word study mode: keyboard navigation via 'i' + h/l (no mouse) ----
-var wordMode = false, wordCount = 0, wordIndex = 0;
-function setWordMode(on) {
-  wordMode = !!on;
-  if (document.body) document.body.classList.toggle('word-mode', wordMode);
-  if (!wordMode) { try { window.getSelection().removeAllRanges(); } catch (e) {} }
-}
-// Number of original-language words for the current verse (the Resource-tab /
-// interlinear list). Word navigation follows this list, not every English word.
-var interCount = 0;
-var interToEng = [];   // interlinear index -> English range index (or -1)
-function setVerseWords(n, engWords, mapping) {
-  interCount = n || 0;
-  // Mapping arrives parallel to the interlinear list. Re-index our English DOM
-  // ranges by matching each English word in order to build interlinear->range.
-  interToEng = [];
-  if (!mapping || !mapping.length || !engWords) { interToEng = []; return; }
-  interToEng = mapping.slice();
-  var r = verseWordRanges();
-  // Sanity: only trust the mapping if our English extraction matches in size.
-  if (r.length !== engWords.length) {
-    interToEng = [];
-  } else {
-    // Map English list index -> DOM range index (they are positional).
-    for (var k = 0; k < interToEng.length; k++) {
-      if (typeof interToEng[k] === 'number' && interToEng[k] >= 0 && interToEng[k] < r.length) {
-        interToEng[k] = interToEng[k];
-      } else {
-        interToEng[k] = -1;
-      }
-    }
-  }
-}
-function verseWordRanges() {
-  var el = currentVerseEl();
-  var container = el ? (el.closest('p') || el.parentNode) : document.querySelector('.page.active');
-  if (!container) return [];
-  var isW = function (c) { return /[A-Za-z0-9\u00C0-\u024F''-]/.test(c); };
-  // English function words that carry no original-language word of their own,
-  // so we skip them to keep content highlights aligned with the interlinear.
-  var stop = {'the':1,'and':1,'of':1,'to':1,'in':1,'a':1,'an':1,'is':1,
-              'that':1,'for':1,'was':1,'with':1,'as':1,'on':1,'be':1,'by':1,
-              'at':1,'from':1,'this':1,'shall':1,'his':1,'upon':1,'it':1,
-              'which':1,'he':1,'you':1,'i':1,'not':1,'but':1,'have':1,'had':1,
-              'will':1,'they':1,'them':1,'their':1,'are':1,'were':1,'who':1};
-  var ranges = [];
-  var walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT, null, false);
-  var node;
-  while ((node = walker.nextNode())) {
-    var p = node.parentElement;
-    if (p && p.tagName === 'SUP') continue;
-    if (p && p.classList && p.classList.contains('v')) continue;
-    if (p && p.tagName === 'A' && p.getAttribute('href') && /^#/.test(p.getAttribute('href'))) continue;
-    var t = node.nodeValue || '';
-    var i = 0;
-    while (i < t.length) {
-      if (isW(t[i])) {
-        var s = i;
-        while (i < t.length && isW(t[i])) i++;
-        var word = t.slice(s, i);
-        if (!stop[word.toLowerCase()]) ranges.push({ node: node, start: s, end: i, text: word });
-      } else { i++; }
-    }
-  }
-  return ranges;
-}
-// Select and report the nth ORIGINAL-LANGUAGE word (interlinear index). It maps
-// to the matching English content word via the gloss-based alignment computed in
-// Python, so navigation follows the Resource tab rather than every English word.
-function selectWordIndex(idx) {
-  var r = verseWordRanges();
-  var total = interCount > 0 ? interCount : r.length;
-  if (total === 0) { post({ type: 'wordpos', index: 0, count: 0, text: '', verse: currentVerseNum() }); return 0; }
-  if (idx < 0) idx = 0;
-  if (idx >= total) idx = total - 1;
-  wordIndex = idx; wordCount = total;
-  var e = null;
-  if (r.length > 0) {
-    var ei = -1;
-    if (interToEng.length) {
-      if (interToEng[idx] != null) ei = interToEng[idx];
-    } else {
-      // Fallback: order-preserving proportional position.
-      ei = total <= 1 ? 0 : Math.round(idx * (r.length - 1) / (total - 1));
-      if (ei >= r.length) ei = r.length - 1;
-    }
-    if (ei >= 0 && ei < r.length) e = r[ei];
-  }
-  if (e) {
-    try {
-      var rg = document.createRange();
-      rg.setStart(e.node, e.start);
-      rg.setEnd(e.node, e.end);
-      var s = window.getSelection(); s.removeAllRanges(); s.addRange(rg);
-      var target = e.node.parentElement;
-      if (target) {
-        target.scrollIntoView({block: 'nearest'});
-        var page = target.closest('.page');
-        if (page && page.scrollHeight > page.clientHeight) {
-          var tRect = target.getBoundingClientRect();
-          var pRect = page.getBoundingClientRect();
-          if (tRect.bottom > pRect.bottom) page.scrollTop += tRect.bottom - pRect.bottom + 20;
-          else if (tRect.top < pRect.top) page.scrollTop -= pRect.top - tRect.top + 20;
-        }
-      }
-    } catch (err) {}
-  } else {
-    try { window.getSelection().removeAllRanges(); } catch (err) {}
-  }
-  post({ type: 'wordpos', index: idx, count: total, text: e ? e.text : '', verse: currentVerseNum() });
-  return total;
-}
-function clearWordSel() { try { window.getSelection().removeAllRanges(); } catch (e) {} }
 
 function showPage(idx) {
   if (!state.ready || state.pages === 0) return 0;

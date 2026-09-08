@@ -1,6 +1,6 @@
-# Omarchy-Bible user theme.
+# OmaBible user theme.
 #
-# Copy to ~/.config/omarchy-bible/theme.toml to theme the app on any
+# Copy to ~/.config/omabible/theme.toml to theme the app on any
 # platform (including macOS, where the Omarchy live palette is absent).
 # Each value is an HTML/CSS colour. Omit a key to fall back to the
 # built-in Ash default.

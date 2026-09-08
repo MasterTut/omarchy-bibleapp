@@ -188,7 +188,7 @@ class ResourcesMixin:
         bnum = lexicon.book_number(book_display)
         m = re.search(r"(\d+)\s*$", self.chapters[self.chapter_index][1] or "")
         cnum = int(m.group(1)) if m else (self.chapter_index + 1)
-        verse = getattr(self, "_word_verse", 0) or self._current_verse or 1
+        verse = self._current_verse or 1
         return bnum, cnum, verse
     def _word_row(self, w, index=0, active=False):
         strongs_code = w.get("strongs", "")
@@ -356,15 +356,13 @@ class ResourcesMixin:
                     )
                 else:
                     n = len(words)
-                    idx = min(self._word_index, n - 1) if n else 0
-                    selected = self._selected_word or (words[idx].get("w", "") if n else "")
+                    selected = words[0].get("w", "") if n else ""
                     self._ref_placeholder(
                         f"{book_name} {cnum}:{verse}  "
-                        f"\"{selected}\"  "
-                        f"({min(idx + 1, n)}/{n} h/l)"
+                        f"\"{selected}\""
                     )
                     for i, w in enumerate(words):
-                        self._word_row(w, i, i == idx)
+                        self._word_row(w, i, i == 0)
 
         self._refs_overlay.show_all()
         self._refs_overlay.set_visible(True)

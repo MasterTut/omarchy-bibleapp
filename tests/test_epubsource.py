@@ -9,7 +9,8 @@ Or under pytest if installed:
     .venv/bin/pytest tests/test_epubsource.py -q
 
 Sample EPUBs are looked up in ../translations and, optionally, via the
-OMARCHY_BIBLE_STUDY env var (path to an ESV Study Bible EPUB). Missing files are
+OMABIBLE_STUDY env var (path to an ESV Study Bible EPUB; the legacy
+OMARCHY_BIBLE_STUDY name is honoured as a fallback). Missing files are
 skipped rather than failed, so the suite stays green on a checkout that ships
 only the bundled books.
 """
@@ -35,7 +36,7 @@ CASES = [
     ("ASV", _find("ASV.epub"), 1100, 60, 0),
     ("Crossway ESV", _find("The Holy Bible English Standard Version (E - Crossway Bibles.epub"),
      1000, 60, 1),  # chapter 0 is the Preface; scripture starts at 1
-    ("ESV Study Bible", os.environ.get("OMARCHY_BIBLE_STUDY"), 1100, 60, 0),
+    ("ESV Study Bible", os.environ.get("OMABIBLE_STUDY") or os.environ.get("OMARCHY_BIBLE_STUDY"), 1100, 60, 0),
 ]
 
 

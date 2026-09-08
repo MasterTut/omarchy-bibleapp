@@ -48,7 +48,7 @@ class EpubSource:
         self.book = epub.read_epub(self.path)
         if self.bookdir:
             shutil.rmtree(self.bookdir, ignore_errors=True)
-        self.bookdir = tempfile.mkdtemp(prefix="omarchy-bible-")
+        self.bookdir = tempfile.mkdtemp(prefix="omabible-")
 
         self.item_paths = {}
         for item in self.book.get_items():

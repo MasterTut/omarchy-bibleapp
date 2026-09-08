@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Omarchy-Bible - a minimal EPUB Bible reader styled after the Omarchy Ash theme."""
+"""OmaBible - a minimal EPUB Bible reader styled after the Omarchy Ash theme."""
 
 import html
 import os
@@ -24,7 +24,7 @@ from reader_config import (
     load_theme, load_config, log_import, load_state, save_state,
     load_notes, save_notes, load_settings, save_settings,
     load_prayers, save_prayers, load_memory, save_memory,
-    list_translations, _display_name,
+    list_translations, _display_name, migrate_data_dir,
 )
 from reader_assets import FONT_FAMILY, STYLESHEET, PAGE_JS, JS_HANDLER
 from ui_toc import TocMixin
@@ -35,7 +35,6 @@ from document import Document
 import personalspace
 import verse_ref
 import lexicon
-import wordmatch
 
 import re as _re
 _VERSE_PARA_RE = _re.compile(r'<p[^>]*><sup[^>]*data-vn="(?P<vn>\d+)"[^>]*>.*?</sup>(?P<body>.*?)</p>', _re.S)
@@ -57,11 +56,7 @@ class OmarchyReader(Gtk.Application, TocMixin, SearchMixin, SettingsMixin, Resou
         self._mode_chips = None
         self._mode_hint = None
         self._pending_verse = 0
-        self._word_mode = False
-        self._selected_word = ""
-        self._word_verse = 0
-        self._word_index = 0
-        self._word_count = 0
+        self._prev_search_pos = None   # (book_path, chapter, verse) before a search jump
         self._refs_panel_height = 240
         self._search_panel_height = 300
         self._refs_tab = "notes"
@@ -94,6 +89,7 @@ class OmarchyReader(Gtk.Application, TocMixin, SearchMixin, SettingsMixin, Resou
         self._on_home = False
         self._home_options = []
         self._home_sel = 0
+        self._game_sel = 0
 
     # ---- Reading-state properties backed by Document (single source of truth) ----
     @property
@@ -160,10 +156,18 @@ class OmarchyReader(Gtk.Application, TocMixin, SearchMixin, SettingsMixin, Resou
         return 0
 
     def do_activate(self):
+        migrate_data_dir()
         load_theme()
         load_config()
         load_settings()
-        self.create_window()
+        try:
+            self.create_window()
+        except Exception as e:
+            # A failed create_window would otherwise leave a windowless
+            # single-instance process that silently swallows later launches.
+            print(f"OmaBible failed to start:\n{e}", file=sys.stderr)
+            self.quit()
+            return
         self.window.present()
         self._start_theme_monitor()
         path = getattr(self, "cli_path", None)
@@ -178,7 +182,7 @@ class OmarchyReader(Gtk.Application, TocMixin, SearchMixin, SettingsMixin, Resou
 
     def create_window(self):
         win = Gtk.ApplicationWindow(application=self)
-        win.set_title("Omarchy-Bible")
+        win.set_title("OmaBible")
         win.set_default_size(900, 700)
 
         # Enable real window transparency: the reading surface uses a
@@ -217,6 +221,8 @@ class OmarchyReader(Gtk.Application, TocMixin, SearchMixin, SettingsMixin, Resou
 
         self.headerbar = hb
         win.set_titlebar(hb)
+        # Keep the WM a sensible title even with a custom headerbar.
+        win.set_title("OmaBible")
         # Default header visibility is driven by the auto-hide-header setting.
         if SETTINGS.get("auto_hide_header", True):
             self.headerbar.set_visible(False)
@@ -411,9 +417,6 @@ class OmarchyReader(Gtk.Application, TocMixin, SearchMixin, SettingsMixin, Resou
         pages = getattr(self, "_page_pages", 0) or self.page_count
         if pages:
             text += f"   {self.current_page + 1}/{pages}"
-        if self._word_mode:
-            word = self._selected_word or "—"
-            text = f"word: {word}" + ("   " + title if title else "")
         return text
 
     # ---------------- Notes ----------------
@@ -753,72 +756,6 @@ class OmarchyReader(Gtk.Application, TocMixin, SearchMixin, SettingsMixin, Resou
         """J steps down / K steps up through the verses in the current page."""
         delta = 1 if direction == "down" else -1
         self._run_js(f"moveVerse({delta});")
-
-    def _word_total(self):
-        """Number of interlinear words for the current verse (the Resource-tab list)."""
-        if not self.doc or not self.chapters:
-            return 0
-        bnum, cnum, verse = self._inspect_ref()
-        return len(lexicon.interlinear(bnum, cnum, verse)) if bnum else 0
-
-    def _word_model_js(self):
-        """Return JS that installs the aligned word model for the current verse.
-
-        Sends the interlinear word list, the order/position of the English words
-        and the mapping (interlinear index -> English index, -1 = none), computed
-        with :func:`wordmatch.align` using Strong's glosses.
-        """
-        try:
-            import json as _json
-            if not self.source or not self.chapters:
-                return "setVerseWords(0,[],[]);"
-            bnum, cnum, verse = self._inspect_ref()
-            inter = lexicon.interlinear(bnum, cnum, verse) if bnum else []
-            eng = wordmatch.non_stop_words(self._verse_english_text(verse))
-            mapping = wordmatch.align(eng, inter)
-            return "setVerseWords(%d,%s,%s);" % (
-                len(inter), _json.dumps(eng), _json.dumps(mapping),
-            )
-        except Exception:
-            return "setVerseWords(0,[],[]);"
-
-    def _verse_english_text(self, verse):
-        """Return the plain English text of a verse of the current chapter."""
-        try:
-            html = self.source.chapter_html(self.chapter_index)
-            for m in _VERSE_PARA_RE.finditer(html):
-                if int(m.group("vn")) == verse:
-                    return re.sub(r"<[^>]+>", "", m.group("body"))
-        except Exception:
-            pass
-        return ""
-
-    def _toggle_word_mode(self):
-        self._word_mode = not self._word_mode
-        if self._word_mode:
-            self._word_index = 0
-            self._run_js(
-                "setWordMode(true); " + self._word_model_js() + " selectWordIndex(0);"
-            )
-        else:
-            self._selected_word = ""
-            self._word_index = self._word_count = 0
-            self._run_js("setWordMode(false);")
-        self._update_header_focus()
-
-    def _word_step(self, delta):
-        if not self._word_mode:
-            return
-        self._run_js("selectWordIndex(%d);" % (self._word_index + delta))
-
-    def _on_wordpos(self, data):
-        self._word_index = int(data.get("index") or 0)
-        self._word_count = int(data.get("count") or 0)
-        self._selected_word = (data.get("text") or "").strip()
-        self._word_verse = int(data.get("verse") or 0)
-        self._refresh_refs()
-        self._scroll_to_active_word()
-        self._update_mode_line()
 
     def _panel_focus_state(self):
         focused = self._focus_in_text_input()
@@ -1373,6 +1310,20 @@ class OmarchyReader(Gtk.Application, TocMixin, SearchMixin, SettingsMixin, Resou
                 color: {THEME["foreground"]};
                 border-radius: 0;
             }}
+            .search-preview {{
+                border-top: 1px solid alpha({THEME["accent"]}, 0.5);
+                background-color: alpha({THEME["accent"]}, 0.06);
+                padding: 8px 16px;
+            }}
+            .search-preview .preview-ref {{
+                color: {THEME["accent"]};
+                font-weight: bold;
+                font-size: 13px;
+            }}
+            .search-preview .preview-text {{
+                color: {THEME["foreground"]};
+                font-size: {self.font_size}px;
+            }}
             switch {{
                 color: {THEME["foreground"]};
             }}
@@ -1516,7 +1467,7 @@ class OmarchyReader(Gtk.Application, TocMixin, SearchMixin, SettingsMixin, Resou
     def _title_label(self):
         box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
         box.set_halign(Gtk.Align.CENTER)
-        self.title_label = Gtk.Label(label="Omarchy-Bible")
+        self.title_label = Gtk.Label(label="OmaBible")
         self.title_label.get_style_context().add_class("title-label")
         box.pack_start(self.title_label, False, False, 0)
 
@@ -1544,14 +1495,11 @@ class OmarchyReader(Gtk.Application, TocMixin, SearchMixin, SettingsMixin, Resou
         if f == "refs":
             return "Ctrl+J content · 1-5 tabs · j/k scroll · h/l tabs"
         # content
-        if self._word_mode:
-            return "h/l cycle words · j/k change verse · i exit word mode"
         tips = []
         if self._notes_overlay.get_visible():
             tips.append("Ctrl+J ⇄ Personal Space")
         elif self._refs_overlay is not None and self._refs_overlay.get_visible():
             tips.append("Ctrl+J ⇄ Resources")
-        tips.append("i word study")
         if not self._notes_overlay.get_visible():
             tips.append("Ctrl+P notes")
         if self._refs_overlay is not None and not self._refs_overlay.get_visible():
@@ -1616,6 +1564,9 @@ class OmarchyReader(Gtk.Application, TocMixin, SearchMixin, SettingsMixin, Resou
         )
 
     def show_welcome(self, status_msg=None):
+        if SETTINGS.get("game_mode"):
+            self._show_game_home(status_msg)
+            return
         self._is_loading = False
         self._show_spinner(False)
         self.loading_box.set_visible(False)
@@ -1715,6 +1666,122 @@ document.addEventListener('click', function (e) {{
         self.webview.load_html(page_html, None)
         self._focus = "content"
         self._update_header_focus()
+
+    # ---------------- GameMode home ----------------
+    def _show_game_home(self, status_msg=None):
+        """Zelda-style library: fires cycle translations, the sword continues."""
+        self._is_loading = False
+        self._show_spinner(False)
+        self.loading_box.set_visible(False)
+        self._hide_notes()
+        if self._refs_overlay is not None:
+            self._refs_overlay.set_visible(False)
+        self._hide_settings()
+        self._hide_help()
+        if self._dock is not None:
+            self._dock.set_visible(False)
+        self._on_home = True
+        self._last_status = status_msg or ""
+
+        translations = list_translations()
+        self._home_options = list(translations)
+        if not translations:
+            self._game_sel = 0
+        else:
+            self._game_sel %= len(translations)
+        self._home_sel = self._game_sel
+
+        sel_file = translations[self._game_sel] if translations else ""
+        name = _display_name(sel_file) if sel_file else ""
+        sub = "Press i to import an EPUB." if not translations else \
+            "Press Enter or click the sword to take this one."
+        status_html = ""
+        if getattr(self, "_last_status", ""):
+            status_html = f'<div class="game-status">{html.escape(self._last_status)}</div>'
+        flame_l = f'<svg class="flame" width="44" height="68" viewBox="0 0 40 60"><path d="M20 4 C 27 16 34 22 34 34 C 34 45 26 52 20 56 C 14 52 6 45 6 34 C 6 22 13 16 20 4 Z" fill="#e8a23b"/><path d="M20 18 C 23 26 28 30 28 36 C 28 43 24 48 20 51 C 16 48 12 43 12 36 C 12 30 17 26 20 18 Z" fill="#ffe9a8"/></svg>'
+        flame_r = f'<svg class="flame" width="44" height="68" viewBox="0 0 40 60"><path d="M20 4 C 27 16 34 22 34 34 C 34 45 26 52 20 56 C 14 52 6 45 6 34 C 6 22 13 16 20 4 Z" fill="#e8a23b"/><path d="M20 18 C 23 26 28 30 28 36 C 28 43 24 48 20 51 C 16 48 12 43 12 36 C 12 30 17 26 20 18 Z" fill="#ffe9a8"/></svg>'
+        sword = """
+<svg width="68" height="112" viewBox="0 0 24 40">
+  <polygon points="12,0 15,17 9,17" fill="#cfd2d6"/>
+  <line x1="12" y1="4" x2="12" y2="14" stroke="#8a8f96" stroke-width="0.8"/>
+  <rect x="10.6" y="18" width="2.8" height="7" fill="#b08d3e"/>
+  <rect x="6" y="17" width="12" height="2.2" fill="#d4af37"/>
+  <circle cx="12" cy="27" r="1.7" fill="#d4af37"/>
+</svg>"""
+        yn = json.dumps(name)[1:-1] if name else ""
+
+        page_html = f"""<!doctype html><html><head><meta charset="utf-8">
+{self._styles()}
+<script>
+function post(msg) {{
+  if (window.webkit && window.webkit.messageHandlers &&
+      window.webkit.messageHandlers.omarchy) {{
+    try {{ window.webkit.messageHandlers.omarchy.postMessage(JSON.stringify(msg)); }}
+    catch (e) {{}}
+  }}
+}}
+document.addEventListener('click', function (e) {{
+  var t = e.target.closest('[data-action]');
+  if (!t) return;
+  e.preventDefault();
+  var action = t.getAttribute('data-action');
+  if (action === 'cycle') post({{type:'game_action', action:'cycle', dir: t.getAttribute('data-dir')}});
+  else if (action === 'start') post({{type:'game_action', action:'start'}});
+}});
+</script>
+</head><body class="home-body">
+<div class="game">
+  <div class="game-quote">
+    <span class="t">IT&#8217;S DANGEROUS TO GO ALONE!</span>
+    <span class="t">TAKE THIS.</span>
+  </div>
+  {status_html}
+  <div class="game-cave">
+    <div class="game-fire" data-action="cycle" data-dir="-1" title="Previous translation (h)">{flame_l}</div>
+    <a class="game-sword" href="javascript:void(0)" data-action="start" title="Continue reading">
+      {sword}
+      <span class="game-sword-label" id="game-name">{name}</span>
+    </a>
+    <div class="game-fire flame-r" data-action="cycle" data-dir="1" title="Next translation (l)">{flame_r}</div>
+  </div>
+  <div class="game-sub">{sub}</div>
+  <div class="game-footer">h / l cycle translation &#183; Enter sword continue &#183; i import &#183; x remove</div>
+</div>
+</body></html>"""
+        self.webview.load_html(page_html, None)
+        self._home_sel = self._game_sel
+        self._focus = "content"
+        self._update_header_focus()
+
+    def _game_home_cycle(self, delta):
+        """h/l (fires) select the next/previous translation."""
+        translations = list_translations()
+        if not translations:
+            return
+        n = len(translations)
+        self._game_sel = (self._game_sel + delta) % n
+        self._home_sel = self._game_sel
+        name = _display_name(translations[self._game_sel])
+        js = (
+            "var e=document.getElementById('game-name');"
+            "if(e)e.textContent=" + json.dumps(name) + ";"
+        )
+        self._run_js(js)
+
+    def _game_home_start(self):
+        """Sword: continue in the selected translation at the saved spot."""
+        translations = list_translations()
+        if not translations:
+            return
+        file = translations[self._game_sel % len(translations)]
+        state = load_state()
+        path = os.path.join(TRANSLATIONS_DIR, file)
+        if state.get("book") == file:
+            chapter = max(0, int(state.get("chapter") or 1) - 1)
+            page = max(0, int(state.get("page") or 1) - 1)
+            self.open_book(path, resume_index=chapter, resume_page_num=page)
+        else:
+            self.open_book(path)
 
     def show_loading(self, msg="Opening EPUB file"):
         # Native GTK overlay — no second load_html, so no blank-window race.
@@ -1910,6 +1977,27 @@ document.addEventListener('click', function (e) {{
         self.webview.load_html(page_html, base_url)
         return False
 
+    def _restore_search_origin(self):
+        """Jump back to the verse that was reading before the last search jump."""
+        prev = getattr(self, "_prev_search_pos", None)
+        if not prev:
+            return False
+        path, idx, verse = prev
+        self._prev_search_pos = None
+        if not path or idx is None or idx < 0:
+            return False
+        self._pending_verse = verse or 0
+        self._focus = "content"
+        if path != getattr(self, "book_path", None):
+            # Different book: reopen it at the remembered chapter.
+            self.open_book(path, resume_index=idx)
+        elif not getattr(self, "chapters", None):
+            return False
+        else:
+            self._do_load_chapter(idx)
+            self._focus_content()
+        return True
+
     # ---------------- Load events ----------------
     def on_load_changed(self, webview, event):
         if event != WebKit2.LoadEvent.FINISHED:
@@ -1937,12 +2025,16 @@ document.addEventListener('click', function (e) {{
         elif mtype == "import_epub":
             log_import("received import_epub message from webview")
             self._on_import_epub()
+        elif mtype == "game_action":
+            action = data.get("action")
+            if action == "cycle":
+                self._game_home_cycle(int(data.get("dir") or 0))
+            elif action == "start":
+                self._game_home_start()
         elif mtype == "ready":
             self._is_loading = False
             self._current_verse = 0
             self._refs_pinned = None
-            self._word_mode = False
-            self._selected_word = ""
             self._update_verse_label()
             self._refresh_refs()
             pages = data.get("pages", 0)
@@ -1996,11 +2088,6 @@ document.addEventListener('click', function (e) {{
             self._refs_pinned = None
             self._update_verse_label()
             self._refresh_refs()
-            if self._word_mode:
-                # Moved to a new verse -> start its word cycle at word 0,
-                # following the interlinear (resource-tab) list.
-                self._word_index = 0
-                self._run_js("selectWordIndex(0); " + self._word_model_js())
             self._refresh_notes()
         elif mtype == "ref":
             label = data.get("label", "")
@@ -2013,8 +2100,6 @@ document.addEventListener('click', function (e) {{
             self._refresh_refs()
         elif mtype == "memory_capture":
             self._memory_add(int(data.get("verse") or 0), data.get("text", ""))
-        elif mtype == "wordpos":
-            self._on_wordpos(data)
         elif mtype == "edge":
             if data.get("dir") == "next":
                 self.next_chapter()
@@ -2314,9 +2399,33 @@ document.addEventListener('click', function (e) {{
                 return True
 
         # Home screen: j/k move the selection, Enter opens, x deletes a
-        # translation, i imports an EPUB.
+        # translation, i imports an EPUB. In GameMode the fires (h/l) cycle
+        # translations and Enter is the sword that starts reading.
         if self._on_home:
-            if kn == "j":
+            if SETTINGS.get("game_mode"):
+                if not ctrl and not shift:
+                    if kn in ("h", "left"):
+                        self._game_home_cycle(-1)
+                        return True
+                    if kn in ("l", "right"):
+                        self._game_home_cycle(1)
+                        return True
+                    if kn == "j":
+                        self._game_home_cycle(1)
+                        return True
+                    if kn == "k":
+                        self._game_home_cycle(-1)
+                        return True
+                    if kn in ("return", "kp_enter"):
+                        self._game_home_start()
+                        return True
+                    if kn == "i":
+                        self._on_import_epub()
+                        return True
+                    if kn == "x":
+                        self._home_delete()
+                        return True
+            elif kn == "j":
                 self._home_move(1)
                 return True
             if kn == "k":
@@ -2337,13 +2446,6 @@ document.addEventListener('click', function (e) {{
         # typing is done with Ctrl+1/2/3 (handled in the Ctrl block).
         if self._focus == "notes" and self._focus_in_text_input():
             return False
-
-        # 'i' in the reading content toggles word-study mode (highlight/capture
-        # individual words instead of whole verses) — groundwork for original-
-        # language lookups.
-        if not ctrl and not shift and kn == "i" and self._focus == "content" and self.chapters:
-            self._toggle_word_mode()
-            return True
 
         # Number keys switch tabs for the focused panel: 1-5 for Resources,
         # 1-3 for Personal Space (Notes / Prayer / Memory).
@@ -2405,12 +2507,11 @@ document.addEventListener('click', function (e) {{
             return False
 
         # Content focus: j/k/h/l/arrows are handled by the page's own JS (verse
-        # stepping + paging), so let them through. In word mode, h/l (and the
-        # arrow keys) walk the current verse word-by-word instead.
+        # stepping + paging), so let them through.
         if self._focus == "content":
-            if self._word_mode and kn in ("h", "l", "left", "right"):
-                self._word_step(1 if kn in ("l", "right") else -1)
-                return True
+            if not ctrl and not shift and kn == "backspace":
+                if self._restore_search_origin():
+                    return True
             if kn in ("j", "k", "up", "down", "h", "l", "left", "right"):
                 return False
             if kn == "page_down" or kn == "space":
@@ -2491,6 +2592,7 @@ document.addEventListener('click', function (e) {{
             self.show_welcome()
 
 def main():
+    GLib.set_prgname("OmaBible")
     args = list(sys.argv)
     cli_path = None
     if len(args) > 1:
@@ -2506,5 +2608,5 @@ if __name__ == "__main__":
     try:
         main()
     except Exception as e:
-        print(f"Omarchy-Bible failed to start:\n{e}", file=sys.stderr)
+        print(f"OmaBible failed to start:\n{e}", file=sys.stderr)
         sys.exit(1)
