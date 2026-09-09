@@ -2,6 +2,7 @@
 import json
 import os
 import re
+import shutil
 import sys
 import tomllib
 
@@ -191,10 +192,8 @@ def migrate_data_dir():
             if os.path.isfile(src) or os.path.isdir(src):
                 dst = os.path.join(DATA_DIR, name)
                 if os.path.isdir(src):
-                    import shutil
                     shutil.copytree(src, dst, dirs_exist_ok=True)
                 else:
-                    import shutil
                     shutil.copy2(src, dst)
     except Exception:
         pass
@@ -372,14 +371,5 @@ def list_translations():
 
 def _display_name(filename):
     name = os.path.splitext(filename)[0]
-    # "ub-EASV" -> "EASV", "KJV.epub" -> "KJV"
     name = name.split("-")[-1]
     return name
-
-
-def current_theme_name():
-    try:
-        with open(os.path.join(OMARCHY_STATE, "current", "theme.name"), "r", encoding="utf-8") as fh:
-            return fh.read().strip()
-    except Exception:
-        return "Unknown"

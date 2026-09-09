@@ -34,7 +34,6 @@ BOOKS = [
 ]
 _BOOK_INDEX = {b: i + 1 for i, b in enumerate(BOOKS)}
 
-_IS_TEST = "PYTEST_CURRENT_TEST" in os.environ
 if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
     _PKG_DIR = sys._MEIPASS
 else:
@@ -150,8 +149,3 @@ def strongs(code):
     if not code:
         return None
     return (_STRONGS or {}).get(code.upper())
-
-
-def reload():
-    global _NT, _OT, _STRONGS
-    _NT = _OT = _STRONGS = None
