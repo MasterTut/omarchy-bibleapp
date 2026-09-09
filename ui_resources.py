@@ -1,10 +1,12 @@
 """Resources panel (Study Notes / Cross-Refs / Intro / Images / Links / Word) mixin."""
+import os
+import re
+import shlex
+
 import gi
 gi.require_version("Gtk", "3.0")
 gi.require_version("GdkPixbuf", "2.0")
-from gi.repository import Gtk, Gdk, GLib, GdkPixbuf
-import os
-import re
+from gi.repository import Gtk, Gio, Gdk, GLib, GdkPixbuf
 import lexicon
 
 

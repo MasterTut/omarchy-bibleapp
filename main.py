@@ -1,16 +1,14 @@
 #!/usr/bin/env python3
 """OmaBible - a minimal EPUB Bible reader styled after the Omarchy Ash theme."""
 
-import html
+import json
 import os
 import re
-import sys
-import time
-import shlex
-import threading
-import zipfile
-import json
 import shutil
+import sys
+import threading
+import time
+import zipfile
 
 import gi
 
@@ -18,30 +16,28 @@ gi.require_version("Gtk", "3.0")
 gi.require_version("WebKit2", "4.1")
 gi.require_version("GdkPixbuf", "2.0")
 
-from gi.repository import Gtk, Gio, GLib, Gdk, GdkPixbuf, WebKit2
+from gi.repository import Gtk, Gio, GLib, Gdk, WebKit2
 
 from reader_config import (
-    APP_ID, TRANSLATIONS_DIR, THEME, OMARCHY_STATE, HOTKEYS, SETTINGS,
+    APP_ID, TRANSLATIONS_DIR, THEME, OMARCHY_STATE, SETTINGS,
     load_theme, load_config, log_import, load_state, save_state,
     load_notes, save_notes, load_settings, save_settings,
     load_prayers, save_prayers, load_memory, save_memory,
     load_bookmarks, save_bookmarks,
-    list_translations, _display_name, migrate_data_dir,
+    _display_name, migrate_data_dir,
 )
 from reader_assets import FONT_FAMILY, STYLESHEET, PAGE_JS, JS_HANDLER
 from ui_toc import TocMixin
 from ui_search import SearchMixin
 from ui_settings import SettingsMixin
 from ui_resources import ResourcesMixin
+from keybindings import KeybindingMixin
+from ui_home import HomeMixin
 from document import Document
 import personalspace
-import verse_ref
-import lexicon
 
-import re as _re
-_VERSE_PARA_RE = _re.compile(r'<p[^>]*><sup[^>]*data-vn="(?P<vn>\d+)"[^>]*>.*?</sup>(?P<body>.*?)</p>', _re.S)
 
-class OmarchyReader(Gtk.Application, TocMixin, SearchMixin, SettingsMixin, ResourcesMixin):
+class OmarchyReader(Gtk.Application, TocMixin, SearchMixin, SettingsMixin, ResourcesMixin, KeybindingMixin, HomeMixin):
     def __init__(self):
         super().__init__(application_id=APP_ID)
         self.book_path = None
@@ -733,57 +729,6 @@ class OmarchyReader(Gtk.Application, TocMixin, SearchMixin, SettingsMixin, Resou
                 self.window.grab_focus()
             self._panel_focus_state()
             self._update_header_focus()
-
-    def _home_apply_highlight(self):
-        """Visual feedback for the home-screen j/k selection."""
-        if not self._on_home or not self._home_options:
-            return
-        idx = self._home_sel % len(self._home_options)
-        target = f"#home-{idx}"
-        js = (
-            "var els=document.querySelectorAll('.focused');"
-            "for(var i=0;i<els.length;i++)els[i].classList.remove('focused');"
-            f"var t=document.querySelector('{target}');"
-            "if(t)t.classList.add('focused');"
-        )
-        self._run_js(js)
-
-    def _home_move(self, delta):
-        if len(self._home_options) > 1:
-            self._home_sel = (self._home_sel + delta) % len(self._home_options)
-        self._home_apply_highlight()
-
-    def _home_activate(self):
-        if not self._home_options:
-            return
-        idx = self._home_sel % len(self._home_options)
-        sel = self._home_options[idx]
-        if sel == "continue":
-            self._continue_reading()
-        elif sel == "import":
-            self._on_import_epub()
-        else:
-            self.open_book(os.path.join(TRANSLATIONS_DIR, sel))
-
-    def _home_delete(self):
-        """Remove the highlighted translation file (x on the home screen)."""
-        if not self._home_options:
-            return
-        idx = self._home_sel % len(self._home_options)
-        sel = self._home_options[idx]
-        if sel in ("continue", "import"):
-            return
-        path = os.path.join(TRANSLATIONS_DIR, sel)
-        try:
-            if os.path.abspath(path) == os.path.abspath(self.book_path or ""):
-                raise ValueError("Close the book before removing it.")
-            os.remove(path)
-            msg = f"Removed {sel}."
-        except Exception as e:
-            msg = f"Could not remove {sel}: {e}"
-        # Keep the selection near the top of the remaining list.
-        self._home_sel = 0
-        self.show_welcome(msg)
 
     def _move_verse(self, direction):
         """J steps down / K steps up through the verses in the current page."""
@@ -1907,229 +1852,6 @@ class OmarchyReader(Gtk.Application, TocMixin, SearchMixin, SettingsMixin, Resou
             bottom_padding=bottom_padding,
         )
 
-    def show_welcome(self, status_msg=None):
-        self._exit_bookmark_nav()
-        if self._bookmark_bar is not None:
-            self._bookmark_bar.set_visible(False)
-        if SETTINGS.get("game_mode"):
-            self._show_game_home(status_msg)
-            return
-        self._is_loading = False
-        self._show_spinner(False)
-        self.loading_box.set_visible(False)
-        self._hide_notes()
-        if self._refs_overlay is not None:
-            self._refs_overlay.set_visible(False)
-        self._hide_settings()
-        self._hide_help()
-        if self._dock is not None:
-            self._dock.set_visible(False)
-        self._on_home = True
-        self._home_options = []
-        state = load_state()
-        translations = list_translations()
-        self._last_status = status_msg or ""
-
-        # Continue-reading row (only if a book/page was previously saved).
-        ans = ""
-        home_idx = 0
-        last_file = state.get("book")
-        if last_file and os.path.exists(os.path.join(TRANSLATIONS_DIR, last_file)):
-            self._home_options.append("continue")
-            chap = state.get("chapter", 1)
-            page = state.get("page", 1)
-            name = _display_name(last_file)
-            ans = f"""
-            <div class="section continue">
-              <div class="section-title">Continue where you left off</div>
-              <a id="home-{home_idx}" class="continue-item" href="javascript:void(0)" data-action="continue">
-                <span class="cont-book">{name}</span>
-                <span class="cont-pos">Chapter {chap} · Page {page}</span>
-                <span class="cont-arrow">&#10148;</span>
-              </a>
-            </div>"""
-            home_idx += 1
-
-        # Translation list.
-        if translations:
-            items = "".join(
-                f'<a id="home-{home_idx + i}" class="book-item" href="javascript:void(0)" data-file="{t}">'
-                f'<span class="book-name">{_display_name(t)}</span></a>'
-                for i, t in enumerate(translations)
-            )
-            self._home_options.extend(translations)
-            home_idx += len(translations)
-        else:
-            items = '<div class="empty">No translations found in the <code>translations/</code> folder. Place .epub files there.</div>'
-
-        self._home_options.append("import")
-        import_idx = home_idx
-        home_idx += 1
-
-        self._home_sel = 0
-        status_html = ""
-        if getattr(self, "_last_status", ""):
-            status_html = f'<div class="home-status">{html.escape(self._last_status)}</div>'
-
-        page_html = f"""<!doctype html><html><head><meta charset="utf-8">
-{self._styles()}
-<script>
-function post(msg) {{
-  if (window.webkit && window.webkit.messageHandlers &&
-      window.webkit.messageHandlers.omarchy) {{
-    try {{ window.webkit.messageHandlers.omarchy.postMessage(JSON.stringify(msg)); }}
-    catch (e) {{}}
-  }}
-}}
-document.addEventListener('click', function (e) {{
-  var t = e.target.closest('[data-action]') || e.target.closest('[data-file]');
-  if (!t) return;
-  e.preventDefault();
-  var action = t.getAttribute('data-action');
-  if (action === 'continue') post({{type:'continue_reading'}});
-  else if (action === 'import') post({{type:'import_epub'}});
-  else post({{type:'open_book', file: t.getAttribute('data-file')}});
-}});
-</script>
-</head><body class="home-body">
-<div class="home">
-  <div class="home-title">Omarchy&#8209;Bible</div>
-  <div class="home-sub">Choose a Bible translation to begin.</div>
-  {status_html}
-  {ans}
-  <div class="section">
-    <div class="section-title">Bible Translations</div>
-    <div class="book-list">{items}</div>
-  </div>
-  <div class="section">
-    <div class="section-title">Library</div>
-    <a id="home-{import_idx}" class="book-item" href="javascript:void(0)" data-action="import">
-      <span class="book-name">Import EPUB</span>
-    </a>
-  </div>
-   <div class="home-footer">j/k select · Enter open · i import · x remove · Ctrl+Shift+K keys</div>
- </div>
- </body></html>"""
-        self.webview.load_html(page_html, None)
-        self._focus = "content"
-        self._update_header_focus()
-
-    # ---------------- GameMode home ----------------
-    def _show_game_home(self, status_msg=None):
-        """Zelda-style library: fires cycle translations, the sword continues."""
-        self._is_loading = False
-        self._show_spinner(False)
-        self.loading_box.set_visible(False)
-        self._hide_notes()
-        if self._refs_overlay is not None:
-            self._refs_overlay.set_visible(False)
-        self._hide_settings()
-        self._hide_help()
-        if self._dock is not None:
-            self._dock.set_visible(False)
-        self._on_home = True
-        self._last_status = status_msg or ""
-
-        translations = list_translations()
-        self._home_options = list(translations)
-        if not translations:
-            self._game_sel = 0
-        else:
-            self._game_sel %= len(translations)
-        self._home_sel = self._game_sel
-
-        sel_file = translations[self._game_sel] if translations else ""
-        name = _display_name(sel_file) if sel_file else ""
-        sub = "Press i to import an EPUB." if not translations else \
-            "Press Enter or click the sword to take this one."
-        status_html = ""
-        if getattr(self, "_last_status", ""):
-            status_html = f'<div class="game-status">{html.escape(self._last_status)}</div>'
-        flame_l = f'<svg class="flame" width="44" height="68" viewBox="0 0 40 60"><path d="M20 4 C 27 16 34 22 34 34 C 34 45 26 52 20 56 C 14 52 6 45 6 34 C 6 22 13 16 20 4 Z" fill="#e8a23b"/><path d="M20 18 C 23 26 28 30 28 36 C 28 43 24 48 20 51 C 16 48 12 43 12 36 C 12 30 17 26 20 18 Z" fill="#ffe9a8"/></svg>'
-        flame_r = f'<svg class="flame" width="44" height="68" viewBox="0 0 40 60"><path d="M20 4 C 27 16 34 22 34 34 C 34 45 26 52 20 56 C 14 52 6 45 6 34 C 6 22 13 16 20 4 Z" fill="#e8a23b"/><path d="M20 18 C 23 26 28 30 28 36 C 28 43 24 48 20 51 C 16 48 12 43 12 36 C 12 30 17 26 20 18 Z" fill="#ffe9a8"/></svg>'
-        sword = """
-<svg width="68" height="112" viewBox="0 0 24 40">
-  <polygon points="12,0 15,17 9,17" fill="#cfd2d6"/>
-  <line x1="12" y1="4" x2="12" y2="14" stroke="#8a8f96" stroke-width="0.8"/>
-  <rect x="10.6" y="18" width="2.8" height="7" fill="#b08d3e"/>
-  <rect x="6" y="17" width="12" height="2.2" fill="#d4af37"/>
-  <circle cx="12" cy="27" r="1.7" fill="#d4af37"/>
-</svg>"""
-        yn = json.dumps(name)[1:-1] if name else ""
-
-        page_html = f"""<!doctype html><html><head><meta charset="utf-8">
-{self._styles()}
-<script>
-function post(msg) {{
-  if (window.webkit && window.webkit.messageHandlers &&
-      window.webkit.messageHandlers.omarchy) {{
-    try {{ window.webkit.messageHandlers.omarchy.postMessage(JSON.stringify(msg)); }}
-    catch (e) {{}}
-  }}
-}}
-document.addEventListener('click', function (e) {{
-  var t = e.target.closest('[data-action]');
-  if (!t) return;
-  e.preventDefault();
-  var action = t.getAttribute('data-action');
-  if (action === 'cycle') post({{type:'game_action', action:'cycle', dir: t.getAttribute('data-dir')}});
-  else if (action === 'start') post({{type:'game_action', action:'start'}});
-}});
-</script>
-</head><body class="home-body">
-<div class="game">
-  <div class="game-quote">
-    <span class="t">IT&#8217;S DANGEROUS TO GO ALONE!</span>
-    <span class="t">TAKE THIS.</span>
-  </div>
-  {status_html}
-  <div class="game-cave">
-    <div class="game-fire" data-action="cycle" data-dir="-1" title="Previous translation (h)">{flame_l}</div>
-    <a class="game-sword" href="javascript:void(0)" data-action="start" title="Continue reading">
-      {sword}
-      <span class="game-sword-label" id="game-name">{name}</span>
-    </a>
-    <div class="game-fire flame-r" data-action="cycle" data-dir="1" title="Next translation (l)">{flame_r}</div>
-  </div>
-  <div class="game-sub">{sub}</div>
-  <div class="game-footer">h / l cycle translation &#183; Enter sword continue &#183; i import &#183; x remove</div>
-</div>
-</body></html>"""
-        self.webview.load_html(page_html, None)
-        self._home_sel = self._game_sel
-        self._focus = "content"
-        self._update_header_focus()
-
-    def _game_home_cycle(self, delta):
-        """h/l (fires) select the next/previous translation."""
-        translations = list_translations()
-        if not translations:
-            return
-        n = len(translations)
-        self._game_sel = (self._game_sel + delta) % n
-        self._home_sel = self._game_sel
-        name = _display_name(translations[self._game_sel])
-        js = (
-            "var e=document.getElementById('game-name');"
-            "if(e)e.textContent=" + json.dumps(name) + ";"
-        )
-        self._run_js(js)
-
-    def _game_home_start(self):
-        """Sword: continue in the selected translation at the saved spot."""
-        translations = list_translations()
-        if not translations:
-            return
-        file = translations[self._game_sel % len(translations)]
-        state = load_state()
-        path = os.path.join(TRANSLATIONS_DIR, file)
-        if state.get("book") == file:
-            chapter = max(0, int(state.get("chapter") or 1) - 1)
-            page = max(0, int(state.get("page") or 1) - 1)
-            self.open_book(path, resume_index=chapter, resume_page_num=page)
-        else:
-            self.open_book(path)
-
     def show_loading(self, msg="Opening EPUB file"):
         # Native GTK overlay — no second load_html, so no blank-window race.
         self._is_loading = True
@@ -2358,7 +2080,6 @@ document.addEventListener('click', function (e) {{
     def _on_js_message(self, manager, result):
         try:
             msg = result.get_js_value().to_string()
-            import json
             data = json.loads(msg)
         except Exception:
             return
@@ -2539,43 +2260,6 @@ document.addEventListener('click', function (e) {{
             return True
         return False
 
-    def _hotkey_matches(self, binding, keyname, state):
-        """Return True when a configured binding (e.g. "Ctrl+equal") matches.
-
-        Bindings are written as modifier + key name, e.g. Ctrl+t, Ctrl+Shift+h,
-        or a bare key name like t. Modifiers must match exactly, so a binding
-        without Shift never matches a Ctrl+Shift+... press.
-        """
-        if not binding:
-            return False
-        parts = [p.strip() for p in binding.split("+")]
-        mods = [p.lower() for p in parts[:-1]]
-        key = parts[-1]
-        if keyname.lower() != key.lower():
-            return False
-        has_ctrl = bool(state & Gdk.ModifierType.CONTROL_MASK)
-        has_shift = bool(state & Gdk.ModifierType.SHIFT_MASK)
-        if has_ctrl != ("ctrl" in mods):
-            return False
-        if has_shift != ("shift" in mods):
-            return False
-        return True
-
-    def _focus_in_text_input(self):
-        """Return True when keyboard focus is inside a text-entry widget.
-
-        This lets typing (including SPACE / letter keys) work normally in the
-        notes editor instead of being swallowed by the reader's page navigator.
-        """
-        widget = self.window.get_focus()
-        while widget is not None:
-            if isinstance(widget, Gtk.Entry):
-                return True
-            if isinstance(widget, Gtk.TextView):
-                return True
-            widget = widget.get_parent()
-        return False
-
     def _focus_in_webview(self):
         """Return True when keyboard focus is in the webview reader (not in an overlay)."""
         widget = self.window.get_focus()
@@ -2587,355 +2271,6 @@ document.addEventListener('click', function (e) {{
             if widget is getattr(self, "toc_overlay", None):
                 return False
             widget = widget.get_parent()
-        return False
-
-    def on_key_pressed_raw(self, widget, event):
-        keyname = Gdk.keyval_name(event.keyval)
-        kn = keyname.lower() if keyname else ""
-        state = event.state
-        ctrl = bool(state & Gdk.ModifierType.CONTROL_MASK)
-        shift = bool(state & Gdk.ModifierType.SHIFT_MASK)
-
-        # While the search overlay is open, its entry/list own the keyboard.
-        if self._search_overlay is not None and self._search_overlay.get_visible():
-            return False
-
-        # Bookmark-symbol navigation mode: h/l move between the top flags AND
-        # jump straight to the highlighted one; Enter jumps again; Esc/q and
-        # Ctrl+J leave the mode back to the reading content.
-        if self._bookmark_nav:
-            if not ctrl and not shift:
-                if kn in ("h", "left"):
-                    self._bm_nav(-1)
-                    return True
-                if kn in ("l", "right"):
-                    self._bm_nav(1)
-                    return True
-                if kn in ("return", "kp_enter"):
-                    self._bm_open()
-                    return True
-                if kn == "x":
-                    self._bm_delete()
-                    return True
-                if kn in ("escape", "q"):
-                    self._exit_bookmark_nav()
-                    self._focus_content()
-                    return True
-            if ctrl and not shift and kn in ("j", "k"):
-                self._exit_bookmark_nav()
-                self._focus_content()
-                return True
-            return True
-
-        # "/" opens the go-to-passage search (not while typing elsewhere).
-        if not ctrl and not shift and kn == "slash" and self.chapters:
-            self._open_search()
-            return True
-
-        # All keybinding checks use the lower-cased keyname so Shift/CapsLock
-        # do not break hotkeys (e.g. Ctrl+L arriving as keyval "L").
-        if kn == "escape":
-            if self._notes_overlay.get_visible():
-                # In edit mode, Escape returns to navigate mode; otherwise close.
-                if self._ps_editing:
-                    self._exit_ps_edit()
-                else:
-                    self._hide_notes()
-                return True
-            if self._refs_overlay is not None and self._refs_overlay.get_visible():
-                self._hide_refs()
-                return True
-            if self._settings_overlay.get_visible():
-                self._hide_settings()
-                return True
-            if self._help_overlay.get_visible():
-                self._hide_help()
-                return True
-            if self.toc_overlay.get_visible():
-                if self._toc_mode in ("chapters", "verses"):
-                    self._on_toc_back()
-                else:
-                    self._hide_toc()
-                return True
-            return False
-
-        # Ctrl+Shift combos and section cycling. Ctrl+h/j/k/l cycle between the
-        # three sections (notes list -> add a note -> content); handled while
-        # typing too.
-        if ctrl:
-            # Ctrl+1..3 / Ctrl+Shift+1..5 switch tabs while typing is active.
-            if not shift and kn in ("1", "2", "3") and self._notes_overlay.get_visible():
-                self._set_ps_tab({"1": "notes", "2": "prayer", "3": "memory"}[kn])
-                return True
-            if shift and kn in ("1", "2", "3", "4", "5", "6") and self._refs_overlay.get_visible():
-                key = {"1": "notes", "2": "crossrefs", "3": "intro",
-                       "4": "images", "5": "links", "6": "word"}[kn]
-                self._set_ref_tab(key)
-                return True
-            if not shift and kn == "r":
-                # Ctrl+r toggles the reference/commentary panel.
-                self._toggle_refs()
-                return True
-            if not shift and kn == "i":
-                # Ctrl+i imports an EPUB into the library.
-                self._on_import_epub()
-                return True
-            if shift and kn == "k":
-                self._toggle_help()
-                return True
-            if shift and kn == "h":
-                self._toggle_header()
-                return True
-            if shift and keyname in ("plus", "equal"):
-                if self._focus_in_refs():
-                    self._grow_refs_height()
-                else:
-                    self._grow_note_height()
-                return True
-            if shift and keyname in ("minus", "underscore"):
-                if self._focus_in_refs():
-                    self._shrink_refs_height()
-                else:
-                    self._shrink_note_height()
-                return True
-            if not shift and kn == "h":
-                # Ctrl+h focuses the Personal Space notes editor (works while typing).
-                self._edit_from_list()
-                return True
-            if not shift and kn == "l":
-                # Ctrl+l also focuses the Personal Space notes editor for the
-                # current verse.
-                self._edit_from_list()
-                return True
-            if not shift and kn == "m":
-                # Ctrl+M toggles a bookmark on the current page.
-                self._toggle_bookmark_current()
-                return True
-            if not shift and kn in ("j", "k"):
-                if kn == "k" and self._focus == "content" and self._bm_buttons:
-                    # Ctrl+K from the reading content navigates the top
-                    # bookmark symbols (h/l move, Enter jumps, Esc leaves).
-                    self._enter_bookmark_nav()
-                    return True
-                # Ctrl+j / Ctrl+k move keyboard focus between sections:
-                # content <-> personal notes <-> resources.
-                self._focus_next(forward=(kn == "j"))
-                return True
-            if self._hotkey_matches(HOTKEYS.get("toc"), keyname, state):
-                self._toggle_toc()
-                return True
-            if self._hotkey_matches(HOTKEYS.get("note"), keyname, state):
-                self._toggle_notes()
-                return True
-            if self._hotkey_matches(HOTKEYS.get("settings"), keyname, state):
-                self._toggle_settings()
-                return True
-            if not shift and kn == "bracketleft":
-                # Ctrl+[ exits edit mode (e.g. the notes editor) back to the
-                # Personal Space tab/navigate state.
-                if self._ps_editing:
-                    self._exit_ps_edit()
-                return True
-            if self._hotkey_matches(HOTKEYS.get("toggle_reader_mode"), keyname, state):
-                self._toggle_reader_mode()
-                return True
-            if self._hotkey_matches(HOTKEYS.get("font_increase"), keyname, state):
-                self.change_font_size(self.font_size + 2)
-                return True
-            if self._hotkey_matches(HOTKEYS.get("font_decrease"), keyname, state):
-                self.change_font_size(self.font_size - 2)
-                return True
-            if self._hotkey_matches(HOTKEYS.get("page_next"), keyname, state):
-                self._run_js("nextPage();")
-                return True
-            if self._hotkey_matches(HOTKEYS.get("page_prev"), keyname, state):
-                self._run_js("prevPage();")
-                return True
-            if kn == "o":
-                # Open-file dialog is replaced by Import on the home screen.
-                if not self._on_home:
-                    self.on_open()
-                return True
-
-        # Physical Home key returns to the library (only when not typing — a
-        # focused text field consumes Home itself to jump the cursor).
-        if not ctrl and not shift and kn == "home":
-            self.show_welcome()
-            return True
-
-        # Table of contents: arrow keys + Neo-Vim J/k navigation.
-        # h/left goes back a level; l/right are consumed so they don't page the
-        # reader behind the overlay.
-        if self.toc_overlay.get_visible():
-            if kn == "down" or kn == "j":
-                self._toc_move(1)
-                return True
-            if kn == "up" or kn == "k":
-                self._toc_move(-1)
-                return True
-            if kn in ("return", "kp_enter"):
-                self._toc_activate_current()
-                return True
-            if kn in ("h", "left"):
-                self._on_toc_back()
-                return True
-            if kn in ("l", "right"):
-                return True
-
-        # Home screen: j/k move the selection, Enter opens, x deletes a
-        # translation, i imports an EPUB. In GameMode the fires (h/l) cycle
-        # translations and Enter is the sword that starts reading.
-        if self._on_home:
-            if SETTINGS.get("game_mode"):
-                if not ctrl and not shift:
-                    if kn in ("h", "left"):
-                        self._game_home_cycle(-1)
-                        return True
-                    if kn in ("l", "right"):
-                        self._game_home_cycle(1)
-                        return True
-                    if kn == "j":
-                        self._game_home_cycle(1)
-                        return True
-                    if kn == "k":
-                        self._game_home_cycle(-1)
-                        return True
-                    if kn in ("return", "kp_enter"):
-                        self._game_home_start()
-                        return True
-                    if kn == "i":
-                        self._on_import_epub()
-                        return True
-                    if kn == "x":
-                        self._home_delete()
-                        return True
-            elif kn == "j":
-                self._home_move(1)
-                return True
-            if kn == "k":
-                self._home_move(-1)
-                return True
-            if kn in ("return", "kp_enter"):
-                self._home_activate()
-                return True
-            if kn == "i":
-                self._on_import_epub()
-                return True
-            if kn == "x":
-                self._home_delete()
-                return True
-
-        # When Personal Space is focused but the user is typing in a text field
-        # (notes editor / prayer entry), let plain keys type. Tab switching while
-        # typing is done with Ctrl+1/2/3 (handled in the Ctrl block).
-        if self._focus == "notes" and self._focus_in_text_input():
-            return False
-
-        # Number keys switch tabs for the focused panel: 1-5 for Resources,
-        # 1-3 for Personal Space (Notes / Prayer / Memory).
-        if not ctrl and not shift and kn in ("1", "2", "3", "4", "5", "6"):
-            if self._focus == "refs":
-                key = {
-                    "1": "notes", "2": "crossrefs", "3": "intro",
-                    "4": "images", "5": "links", "6": "word",
-                }.get(kn)
-                if key:
-                    self._set_ref_tab(key)
-                    return True
-            elif self._focus == "notes":
-                key = {"1": "notes", "2": "prayer", "3": "memory", "4": "bookmarks"}.get(kn)
-                if key:
-                    self._set_ps_tab(key)
-                    return True
-
-        # Personal Space "navigate" mode (a PS tab button owns the keyboard, not
-        # the reading pane): on the Bookmarks tab j/k/Enter/x move through, open
-        # and delete bookmarks; i/Tab/h/l switch tabs. This is keyed off
-        # self._focus so that Ctrl+K (which hands focus back to the content)
-        # immediately returns j/k to stepping verses.
-        if self._focus == "notes" and not self._ps_editing:
-            if getattr(self, "_ps_tab", "") == "bookmarks" and not ctrl and not shift:
-                if kn in ("j", "down"):
-                    self._bm_list_move(1)
-                    return True
-                if kn in ("k", "up"):
-                    self._bm_list_move(-1)
-                    return True
-                if kn in ("return", "kp_enter"):
-                    self._bm_list_open()
-                    return True
-                if kn == "x":
-                    self._bm_list_delete()
-                    return True
-            if not ctrl and kn == "i":
-                self._enter_ps_edit()
-                return True
-            if kn == "tab":
-                self._cycle_ps_tab(-1 if shift else 1)
-                return True
-            if kn == "backtab":
-                self._cycle_ps_tab(-1)
-                return True
-            if not ctrl and kn == "l":
-                self._cycle_ps_tab(1)
-                return True
-            if not ctrl and kn == "h":
-                self._cycle_ps_tab(-1)
-                return True
-
-        # When the Resources panel is focused, j/k (and arrows) scroll it and
-        # h/l switch tabs — without touching where you are in the content.
-        if self._focus == "refs":
-            if kn in ("j", "down"):
-                self._scroll_refs(1)
-                return True
-            if kn in ("k", "up"):
-                self._scroll_refs(-1)
-                return True
-            if kn in ("space", "page_down"):
-                self._scroll_refs(1, big=True)
-                return True
-            if kn == "page_up":
-                self._scroll_refs(-1, big=True)
-                return True
-            if kn in ("l", "right"):
-                self._set_ref_tab(self._next_ref_tab(1))
-                return True
-            if kn in ("h", "left"):
-                self._set_ref_tab(self._next_ref_tab(-1))
-                return True
-            return False
-
-        # Content focus: j/k/h/l/arrows are handled by the page's own JS (verse
-        # stepping + paging), so let them through.
-        if self._focus == "content":
-            if not ctrl and not shift and kn == "backspace":
-                if self._restore_search_origin():
-                    return True
-            if kn in ("j", "k", "up", "down", "h", "l", "left", "right"):
-                return False
-            if kn == "page_down" or kn == "space":
-                self._run_js("nextPage();")
-                return True
-            if kn == "page_up":
-                self._run_js("prevPage();")
-                return True
-            return False
-
-        # Paging: h/l and arrow/page keys work in any non-content focus too
-        # (e.g. Personal Space browsing a tab without a text field).
-        if kn in ("h", "left"):
-            self._run_js("prevPage();")
-            return True
-        if kn in ("l", "right"):
-            self._run_js("nextPage();")
-            return True
-        if kn == "page_down" or kn == "space":
-            self._run_js("nextPage();")
-            return True
-        if kn == "page_up":
-            self._run_js("prevPage();")
-            return True
         return False
 
     def _toggle_reader_mode(self):
